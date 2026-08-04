@@ -1,0 +1,14 @@
+{
+  "name": "naimeng-intake",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "耐萌达人资料录入工具 —— 粘贴微信资料，AI 识别，人工确认后入库",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  }
+}
