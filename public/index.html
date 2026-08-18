@@ -25,7 +25,8 @@ input,textarea,select{font-family:inherit;font-size:14px;color:var(--ink-900)}
 .topbar{display:flex;align-items:center;gap:16px;height:58px;padding:0 22px;background:var(--white);
   border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30}
 .title{font-size:16px;font-weight:800;white-space:nowrap}
-.badge{padding:3px 9px;border-radius:6px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.badge{display:inline-flex;align-items:center;flex:none;height:22px;padding:0 9px;border-radius:6px;
+  font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap}
 .badge.mock{background:var(--line-soft);color:var(--ink-500)}
 .badge.llm{background:var(--green-soft);color:var(--green)}
 .tabs{display:flex;gap:4px;margin:0 auto}
@@ -89,7 +90,10 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--blue);bo
 .qitem .nm{font-weight:700;font-size:14px}
 .qitem .r2{margin-top:6px;color:var(--ink-500);font-size:12px;line-height:1.7}
 .qitem .acts{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
-.st{padding:2px 9px;border-radius:99px;font-size:11.5px;font-weight:700}
+/* 状态胶囊。height + flex:none 是为了在 flex 容器里不被拉伸；
+   之前那个绿色大椭圆的真凶不是拉伸，是 .done 撞名污染了 padding，见下方「完成」段。 */
+.st{display:inline-flex;align-items:center;gap:5px;flex:none;height:22px;padding:0 10px;
+  border-radius:11px;font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap}
 .st.queued{background:var(--line-soft);color:var(--ink-500)}
 .st.running{background:var(--blue-soft);color:var(--blue-ink)}
 .st.done{background:var(--green-soft);color:var(--green)}
@@ -141,12 +145,15 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--blue);bo
 .group-t{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;font-size:12px;
   font-weight:700;color:var(--ink-500);letter-spacing:.04em}
 .group-t span:last-child{font-weight:400}
-.f label{display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:12px;color:var(--ink-700)}
+.f label{display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:12px;color:var(--ink-500)}
 .f input,.f select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--white)}
+/* 识别成功是默认状态，不加任何标记 —— 只标异常，否则每个字段都挂一张标签全是噪声 */
+.f.miss label{color:var(--red)}
 .f.miss input{border-color:#f0bdb8;background:#fffafa}
+.f.chk label{color:var(--amber)}
 .f.chk input{border-color:#eed9a4;background:#fffdf6}
-.tag{display:inline-flex;padding:1px 6px;border-radius:10px;font-size:10.5px;font-weight:600;line-height:1.6}
-.tag.ok{background:var(--green-soft);color:var(--green)}
+.tag{display:inline-flex;align-items:center;flex:none;height:17px;padding:0 6px;border-radius:9px;
+  font-size:10.5px;font-weight:600;line-height:1;white-space:nowrap}
 .tag.miss{background:var(--red-soft);color:var(--red)}
 .tag.chk{background:var(--amber-soft);color:var(--amber)}
 .acct{border:1px solid var(--line);border-radius:var(--r);padding:13px 14px;background:#fcfdfe}
@@ -179,7 +186,55 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--blue);bo
   border:1px solid var(--line);border-radius:var(--r);flex-wrap:wrap}
 .warnmsg{color:var(--amber);font-size:12.5px}
 .tokenbox{padding:12px 14px;border:1px solid var(--line);border-radius:var(--r);background:#fbfcfd;
-  font:12.5px/1.8 ui-monospace,monospace;word-break:break-all;white-space:pre-wrap}
+  font:12.5px/1.9 ui-monospace,monospace;word-break:break-all;white-space:pre-wrap;color:var(--ink-700)}
+
+/* ---------- 发货截图 ---------- */
+.shipdrop{margin-top:12px;padding:14px;border:1px dashed var(--line);border-radius:var(--r);
+  text-align:center;font-size:12.5px;color:var(--ink-500);cursor:pointer;transition:.12s}
+.shipdrop:hover,.shipdrop.over{border-color:var(--blue);background:var(--blue-soft);color:var(--blue-ink)}
+.shipdrop.off{opacity:.55;cursor:not-allowed}
+.shipdrop.off:hover{border-color:var(--line);background:none;color:var(--ink-500)}
+.shipprev{margin-top:10px;display:flex;align-items:center;gap:10px;padding:9px 12px;
+  border:1px solid var(--line);border-radius:var(--r);background:#fbfcfd;font-size:12.5px}
+.shipprev img{width:44px;height:44px;object-fit:cover;border-radius:5px;border:1px solid var(--line)}
+
+.srow{border:1px solid var(--line);border-radius:var(--r);padding:13px 15px;margin-bottom:10px;background:var(--white)}
+.srow.on{border-color:var(--blue);background:var(--blue-soft)}
+.srow.none{border-color:#eed9a4;background:var(--amber-soft)}
+.srow.already{opacity:.6}
+.srow .top{display:flex;align-items:flex-start;gap:12px}
+.srow .ck{width:18px;height:18px;margin-top:2px;flex:none;cursor:pointer}
+.srow .info{flex:1;min-width:0}
+.srow .l1{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:4px}
+.srow .l1 b{font-size:14px}
+.srow .l2{font-size:12px;color:var(--ink-500);line-height:1.7;word-break:break-all}
+.srow .arrow{margin-top:9px;padding-top:9px;border-top:1px dashed var(--line);
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px}
+.srow .arrow select{padding:6px 9px;border:1px solid var(--line);border-radius:6px;
+  background:var(--white);max-width:100%;font-size:12.5px}
+.srow .why{color:var(--ink-300);font-size:11.5px}
+
+/* ---------- 视频匹配卡片（单选） ---------- */
+.mcard{display:grid;grid-template-columns:20px minmax(0,1fr);gap:14px;padding:14px 16px;margin-bottom:10px;
+  border:1px solid var(--line);border-radius:var(--r);background:var(--white);cursor:pointer;transition:.12s}
+.mcard:hover{border-color:var(--ink-200);background:#fcfdff}
+.mcard.on{border-color:var(--blue);background:var(--blue-soft);box-shadow:0 0 0 1px var(--blue)}
+.mcard.warn{border-color:#eed9a4;background:var(--amber-soft)}
+.mcard .radio{width:18px;height:18px;margin-top:2px;border:2px solid var(--ink-200);border-radius:50%;
+  display:grid;place-items:center;flex:none}
+.mcard.on .radio{border-color:var(--blue)}
+.mcard.on .radio::after{content:'';width:9px;height:9px;border-radius:50%;background:var(--blue)}
+.mcard .hd{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:3px}
+.mcard .hd b{font-size:14.5px}
+.mcard .sub{font:12px/1.7 ui-monospace,monospace;color:var(--ink-500);margin-bottom:9px}
+.mcard dl{display:grid;grid-template-columns:56px minmax(0,1fr);gap:5px 12px;margin:0;font-size:12.5px}
+.mcard dt{color:var(--ink-300);font-size:12px}
+.mcard dd{margin:0;color:var(--ink-700);word-break:break-all}
+.mcard dd .dim{color:var(--ink-300)}
+.vsearch{margin-bottom:12px}
+.vsearch input{width:100%;box-sizing:border-box;padding:9px 12px;font-size:13.5px;
+  border:1px solid var(--line);border-radius:var(--r);background:var(--white);outline:none}
+.vsearch input:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
 
 /* ---------- 表格 ---------- */
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -193,12 +248,15 @@ tbody tr:hover{background:#fafcff;cursor:pointer}
 .seg button{padding:5px 14px;border:0;border-radius:6px;background:none;color:var(--ink-500);font-size:12.5px;font-weight:600}
 .seg button.on{background:var(--white);color:var(--blue-ink);box-shadow:0 1px 3px rgba(22,32,43,.12)}
 
-/* ---------- 完成 ---------- */
-.done{text-align:center;padding:44px}
-.done .ico{display:grid;place-items:center;width:46px;height:46px;margin:0 auto 13px;border-radius:50%;
+/* ---------- 完成 ----------
+   类名叫 donepane 不叫 done：原来的 .done 和状态胶囊的 .st.done 撞名，
+   两者特异性都是 (0,1,0)，后定义的 .done 把 padding:44px 覆盖到胶囊上，
+   于是 <span class="st done"> 变成一个 22px 高、上下各撑 44px 的绿色椭圆。 */
+.donepane{text-align:center;padding:44px}
+.donepane .ico{display:grid;place-items:center;width:46px;height:46px;margin:0 auto 13px;border-radius:50%;
   background:var(--green-soft);color:var(--green);font-size:22px}
-.done h2{margin:0 0 6px;font-size:17px}
-.done p{margin:0 0 18px;color:var(--ink-500);font-size:13px}
+.donepane h2{margin:0 0 6px;font-size:17px}
+.donepane p{margin:0 0 18px;color:var(--ink-500);font-size:13px}
 .timer{font-family:ui-monospace,monospace;color:var(--blue);font-weight:700}
 .recap{max-width:560px;margin:0 auto 18px;text-align:left;border:1px solid var(--line);border-radius:var(--r);
   padding:13px 15px;background:#fbfcfd;font-size:12.5px}
@@ -342,6 +400,14 @@ tbody tr:hover{background:#fafcff;cursor:pointer}
       </div>
       <button class="btn-wide" id="go">提交 <span class="kbd">Ctrl+Enter</span></button>
       <p class="tip" id="tip">建档在后台识别，提交后可继续粘下一位；视频口令本地即时解析。</p>
+
+      <div class="shipdrop" id="shipDrop">
+        <b>发货截图</b> —— 点这里选图，或直接 Ctrl+V 粘贴
+        <div class="muted" id="shipHint" style="margin-top:4px"></div>
+      </div>
+      <input type="file" id="shipFile" accept="image/png,image/jpeg,image/webp" style="display:none">
+      <div id="shipPrev"></div>
+
       <div class="hr"></div>
       <div class="chips-t">示例，点击填入</div>
       <div class="chips" id="chips"></div>
@@ -361,11 +427,7 @@ tbody tr:hover{background:#fafcff;cursor:pointer}
     <div class="ov-head">
       <h2 id="confirmTitle">确认合作</h2>
       <span class="badge mock" id="confirmTag"></span>
-      <span class="counts">
-        <span><i class="dot ok"></i>已识别 <i id="cOk">0</i></span>
-        <span style="margin-left:12px"><i class="dot miss"></i>待补充 <i id="cMiss">0</i></span>
-        <span style="margin-left:12px"><i class="dot chk"></i>需核对 <i id="cChk">0</i></span>
-      </span>
+      <span class="counts" id="counts"></span>
       <div class="grow"></div>
       <button class="btn sm" id="jump">下一个待补充 <span class="kbd">Alt+N</span></button>
       <button class="btn sm danger" id="discard">丢弃这条</button>
@@ -389,7 +451,7 @@ tbody tr:hover{background:#fafcff;cursor:pointer}
           <div class="grid2" style="margin-top:12px" id="gCost"></div>
         </div>
         <div class="group" id="gRecipWrap">
-          <div class="group-t"><span>收件信息</span><span class="muted">本次合作的快照，改了不影响历史记录</span></div>
+          <div class="group-t"><span>收件信息</span></div>
           <div class="grid1" id="gRecip"></div>
         </div>
       </div>
@@ -425,14 +487,35 @@ tbody tr:hover{background:#fafcff;cursor:pointer}
     </div>
     <div id="vAlerts"></div>
     <div class="card">
-      <div class="card-h"><h2>确认视频回传</h2><span class="meta">口令原文完整保存，交接时整段复制</span></div>
+      <div class="card-h"><h2>确认视频回传</h2></div>
       <div class="card-b" id="vBody"></div>
+    </div>
+  </div></div>
+
+  <!-- 发货截图批量匹配（覆盖层） -->
+  <div class="ov" id="sb"><div class="ov-panel">
+    <div class="ov-head">
+      <h2>回填快递单号</h2>
+      <span class="badge mock" id="sbTag"></span>
+      <span class="counts" id="sbCounts"></span>
+      <div class="grow"></div>
+      <button class="btn sm" id="sbAll">全选高置信</button>
+      <button class="btn sm danger" id="sbDiscard">丢弃</button>
+      <button class="icon" id="sbClose" title="返回队列">×</button>
+    </div>
+    <div class="ov-body" style="grid-template-columns:1fr">
+      <div class="ov-form" id="sbBody"></div>
+    </div>
+    <div class="ov-foot">
+      <span class="warnmsg" id="sbWarn"></span>
+      <div class="grow"></div>
+      <button class="btn primary" id="sbConfirm">确认回填</button>
     </div>
   </div></div>
 
   <!-- 完成 -->
   <div class="pane" id="s3" style="display:none"><div class="scroller">
-    <div class="card done">
+    <div class="card donepane">
       <div class="ico">✓</div>
       <h2 id="doneTitle">已入库</h2>
       <p id="doneSub"></p>

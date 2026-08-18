@@ -8,7 +8,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -76,8 +76,19 @@ describe('原文出处本地回填', () => {
 /* ================================================================ 隐私 */
 
 describe('提交到版本库的文件不含真实个人信息', () => {
-  const files = ['lib/agent.js', 'lib/rules.js', 'lib/db.js', 'server.js',
-    'public/index.html', 'tests/fixtures/samples.js'];
+  /* 这里必须是「列出要跳过的」而不是「列出要查的」。
+     写死清单的版本漏掉了 tests/rules.test.js，真实号码就是从那个缝里进来的 ——
+     新加一个文件没人会想起来同步这份清单，默认查全部才是对的。 */
+  const SKIP = /^(node_modules|\.git|data|\.worktrees)(\/|$)/;
+  const files = [];
+  (function walk(rel) {
+    for (const e of readdirSync(join(ROOT, rel || '.'), { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (SKIP.test(r)) continue;
+      if (e.isDirectory()) walk(r);
+      else if (/\.(js|json|html|css|md)$/.test(e.name)) files.push(r);
+    }
+  })('');
 
   test('无真实手机号（占位号 138001380xx 除外）', () => {
     for (const f of files) {

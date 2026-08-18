@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import {
   routeInput, parseVideoToken, renderNotifyText,
   normalize, validateForAction, validateVideoSubmit, sanitizeForStore, buildTodos, cleanValue,
+  normalizeShipmentRows, matchShipments, scoreShipmentMatch, maskedPhoneParts,
 } from '../lib/rules.js';
 import { mockExtract } from '../lib/agent.js';
 import { INTAKE_SAMPLES, VIDEO_SAMPLES } from './fixtures/samples.js';
@@ -268,6 +269,88 @@ describe('待办推导', () => {
     const t = build([], { drafts: [{ id: 'df', title: '半截', updatedAt: ago(1) }],
       jobs: [{ id: 'jb', status: 'failed', title: 'x', error: '超时', finishedAt: ago(0) }] });
     assert.deepEqual(types(t).sort(), ['draft_incomplete', 'job_failed']);
+  });
+});
+
+/* ================================================================ 发货截图 */
+
+describe('发货截图匹配', () => {
+  // 截图里手机和门牌都是打码的，姓名还常有脏数据，这些约束来自真实截图
+  const rows = normalizeShipmentRows({ rows: [
+    { recipient_name: '火箭队', phone_masked: '13*****47',
+      address: '示例省 示例市 示范区 示范路1弄**1号101室',
+      products: [{ name: '嗷哩嗷一桶', quantity: 1 }], carrier: '申通', tracking_no: '773435035826894' },
+    { recipient_name: '于小姐联系方式', phone_masked: '13*****33',
+      address: '示例省 示例市 示范区 示范路**2号楼',
+      products: [], carrier: '申通', tracking_no: '773435035826833' },
+    { recipient_name: '查无此人', phone_masked: '13*****00', address: '某省 某市 某区 不存在的地址',
+      products: [], carrier: '申通', tracking_no: '773435035826999' },
+  ] });
+
+  const collab = (o) => ({ status: '待寄样', packages: [], items: [], ...o });
+  const pool = [
+    collab({ id: 'A', creatorName: '火箭队', items: [{ productName: '嗷里嗷冻干零食', quantity: 1 }],
+      recipient: { name: '火箭队', phone: '13800138047', address: '示例省示例市示范区示范路1弄1号101室' } }),
+    collab({ id: 'B', creatorName: '于小姐',
+      recipient: { name: '于小姐', phone: '13800138033', address: '示例省示例市示范区示范路2号楼' } }),
+    collab({ id: 'D', status: '已完成', creatorName: '不该被匹配',
+      recipient: { name: '查无此人', phone: '13800138000', address: '某省某市某区不存在的地址' } }),
+  ];
+
+  test('打码手机号能拆出首尾', () => {
+    assert.deepEqual(maskedPhoneParts('18*****47'), { pre: '18', suf: '47' });
+    assert.equal(maskedPhoneParts('乱七八糟'), null);
+  });
+
+  test('单号去掉非数字字符', () => {
+    assert.equal(rows[0].trackingNo, '773435035826894');
+  });
+
+  test('姓名一致 + 手机首尾 + 地址片段 → 高置信', () => {
+    const r = matchShipments(rows, pool);
+    assert.equal(r[0].level, 'high');
+    assert.equal(r[0].best.collaborationId, 'A');
+  });
+
+  test('脏姓名「于小姐联系方式」靠包含关系匹配上', () => {
+    // 达人原文是「于小姐联系方式：15…」，被速店通整串当成了姓名
+    const r = matchShipments(rows, pool);
+    assert.equal(r[1].best?.collaborationId, 'B');
+  });
+
+  test('已完成的合作不参与匹配', () => {
+    const r = matchShipments(rows, pool);
+    assert.equal(r[2].level, 'none');
+    assert.equal(r[2].best, null);
+  });
+
+  test('手机首尾对不上会扣分，压到阈值以下', () => {
+    const wrong = [collab({ id: 'X', creatorName: '火箭队',
+      recipient: { name: '火箭队', phone: '13800138012', address: '完全不同的地址' } })];
+    assert.equal(matchShipments([rows[0]], wrong)[0].level, 'none');
+  });
+
+  test('单号已存在则标为已回填，不重复匹配', () => {
+    const filled = [{ ...pool[0], packages: [{ carrier: '申通', trackingNo: '773435035826894' }] }];
+    const r = matchShipments([rows[0]], filled);
+    assert.equal(r[0].already, true);
+    assert.equal(r[0].matches.length, 0);
+  });
+
+  test('两条候选分数接近时标 ambiguous，不敢自动选', () => {
+    const twins = [
+      collab({ id: 'T1', creatorName: '双胞胎', recipient: { name: '火箭队', phone: '', address: '' } }),
+      collab({ id: 'T2', creatorName: '双胞胎', recipient: { name: '火箭队', phone: '', address: '' } }),
+    ];
+    const r = matchShipments([rows[0]], twins);
+    assert.equal(r[0].ambiguous, true);
+    assert.equal(r[0].level, 'low', '有歧义时不能给高置信');
+  });
+
+  test('不编造打码内容：地址片段按 * 切开后逐段比对', () => {
+    const { score, why } = scoreShipmentMatch(rows[0], pool[0]);
+    assert.ok(score >= 60);
+    assert.ok(why.some((w) => w.includes('地址片段')));
   });
 });
 

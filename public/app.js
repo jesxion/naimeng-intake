@@ -22,9 +22,18 @@ let t0 = 0, draftId = null, jobId = null, poller = null, routeTimer = null, last
 
 function toast(msg) { const t = el('div', 'toast', esc(msg)); document.body.append(t); setTimeout(() => t.remove(), 2800); }
 
+/* 本浏览器的身份。存在 localStorage 而不是服务端的全局设置里，
+   这样同一台服务器上四个商务各用各的浏览器，身份互不覆盖。 */
+const UID_KEY = 'naimeng.userId';
+const myUserId = () => { try { return localStorage.getItem(UID_KEY) || ''; } catch { return ''; } };
+const setMyUserId = (id) => { try { id ? localStorage.setItem(UID_KEY, id) : localStorage.removeItem(UID_KEY); } catch { /* 隐私模式忽略 */ } };
+
 async function api(method, path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  const uid = myUserId();
+  if (uid) headers['X-User-Id'] = uid;
   const res = await fetch(path, {
-    method, headers: { 'Content-Type': 'application/json' },
+    method, headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({ error: '响应解析失败' }));
@@ -109,7 +118,7 @@ async function refreshConfig() {
     ? `当前身份：<b>${esc(CFG.me.name)}</b> · ${esc(roleName)}`
     : '<b style="color:var(--red)">未设置身份</b>';
   $('#setupNote').style.display = CFG.needsSetup ? 'block' : 'none';
-  fillSettings();
+  fillSettings(); updateShipUI();
 }
 
 async function loadProducts() {
@@ -136,10 +145,12 @@ const goTab = (n) => document.querySelector(`.tabs button[data-tab="${n}"]`).cli
  * 打开覆盖层时底层保持 s1，关闭后直接回到队列，不用重新渲染。
  */
 const showStage = (n) => {
+  const overlay = n === 's2' || n === 'sb';
   $('#s2').classList.toggle('on', n === 's2');
-  document.body.style.overflow = n === 's2' ? 'hidden' : '';
+  $('#sb').classList.toggle('on', n === 'sb');
+  document.body.style.overflow = overlay ? 'hidden' : '';
   for (const k of ['s1', 'sv', 's3']) {
-    $('#' + k).style.display = (k === (n === 's2' ? 's1' : n) ? (k === 's1' ? 'grid' : 'block') : 'none');
+    $('#' + k).style.display = (k === (overlay ? 's1' : n) ? (k === 's1' ? 'grid' : 'block') : 'none');
   }
 };
 
@@ -213,6 +224,68 @@ async function submitVideoToken(text) {
   window.scrollTo({ top: 0 });
 }
 
+/* ================================================================ 发货截图上传 */
+
+let pendingImage = null;   // { dataUrl, name, size }
+
+function updateShipUI() {
+  const drop = $('#shipDrop');
+  drop.classList.toggle('off', !CFG?.visionReady);
+  $('#shipHint').textContent = CFG?.visionReady
+    ? '仓库发来的发货列表截图，识别后批量回填快递单号'
+    : '需要先在「设置 → 视觉模型」配置模型';
+
+  const box = $('#shipPrev'); box.innerHTML = '';
+  if (!pendingImage) return;
+  const p = el('div', 'shipprev');
+  const img = el('img'); img.src = pendingImage.dataUrl; p.append(img);
+  const info = el('div', 'grow');
+  info.innerHTML = `<b>${esc(pendingImage.name)}</b><div class="muted">${(pendingImage.size / 1024).toFixed(0)} KB</div>`;
+  p.append(info);
+  const up = el('button', 'btn sm primary', '识别这张截图');
+  up.onclick = uploadShipment;
+  const rm = el('button', 'btn sm', '取消');
+  rm.onclick = () => { pendingImage = null; updateShipUI(); };
+  p.append(up, rm); box.append(p);
+}
+
+function acceptImage(file) {
+  if (!file || !/^image\/(png|jpeg|webp)$/.test(file.type)) { toast('只支持 PNG / JPG / WebP'); return; }
+  if (!CFG?.visionReady) { openSettings('vision'); toast('先配置视觉模型才能识别截图'); return; }
+  if (file.size > 8 * 1024 * 1024) { toast('图片超过 8MB，请压缩后再传'); return; }
+  const fr = new FileReader();
+  fr.onload = () => { pendingImage = { dataUrl: fr.result, name: file.name || '截图.png', size: file.size }; updateShipUI(); };
+  fr.readAsDataURL(file);
+}
+
+$('#shipDrop').onclick = () => { if (CFG?.visionReady) $('#shipFile').click(); else openSettings('vision'); };
+$('#shipFile').onchange = (e) => { acceptImage(e.target.files[0]); e.target.value = ''; };
+['dragover', 'dragleave', 'drop'].forEach((ev) => {
+  $('#shipDrop').addEventListener(ev, (e) => {
+    e.preventDefault();
+    $('#shipDrop').classList.toggle('over', ev === 'dragover');
+    if (ev === 'drop') acceptImage(e.dataTransfer.files[0]);
+  });
+});
+// 直接 Ctrl+V 粘贴截图，不用先存文件
+document.addEventListener('paste', (e) => {
+  if ($('#s2').classList.contains('on') || $('#sb').classList.contains('on')) return;
+  const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
+  if (!item) return;
+  e.preventDefault();
+  acceptImage(item.getAsFile());
+});
+
+async function uploadShipment() {
+  if (!pendingImage) return;
+  try {
+    await api('POST', '/api/jobs', { imageBase64: pendingImage.dataUrl });
+    pendingImage = null; updateShipUI();
+    setTip('截图已加入队列，识别完成后在右侧批量确认。');
+    loadJobs();
+  } catch (e) { setTip(e.message, true); if (e.status === 428) openSettings('user'); }
+}
+
 /* ================================================================ 识别队列 */
 
 const ST = { queued: '排队中', running: '识别中', done: '待确认', failed: '失败' };
@@ -258,13 +331,22 @@ async function loadJobs() {
     const isDup = !!(s?.dupInDb || s?.dupInQueue);
     const it = el('div', 'qitem' + (isDup ? ' dup' : ''));
 
+    const isShip = j.kind === 'shipment';
     const r1 = el('div', 'r1');
-    r1.append(el('span', 'badge mock', isDup && s.dupInDb ? '新合作' : '建档'));
+    r1.append(el('span', 'badge mock', isShip ? '发货截图' : (isDup && s.dupInDb ? '新合作' : '建档')));
     r1.append(el('span', 'nm', esc(s?.name || j.title || '—')));
-    r1.append(el('span', 'st ' + j.status, (j.status === 'running' ? '<span class="spin"></span> ' : '') + ST[j.status]));
+    // 待确认状态不显示胶囊 —— 右侧「去确认」按钮已经说明了，重复标记只是噪声
+    if (j.status !== 'done') {
+      r1.append(el('span', 'st ' + j.status,
+        (j.status === 'running' ? '<span class="spin"></span> ' : '') + ST[j.status]));
+    }
 
     const acts = el('div', 'acts');
-    if (j.status === 'done') { const b = el('button', 'btn sm primary', '去确认'); b.onclick = () => openJob(j.id); acts.append(b); }
+    if (j.status === 'done') {
+      const b = el('button', 'btn sm primary', isShip ? '去回填' : '去确认');
+      b.onclick = () => (isShip ? openShipment(j.id) : openJob(j.id));
+      acts.append(b);
+    }
     if (j.status === 'failed') {
       const b = el('button', 'btn sm', '重试');
       b.onclick = async () => { await api('POST', `/api/jobs/${j.id}/retry`); loadJobs(); }; acts.append(b);
@@ -278,7 +360,15 @@ async function loadJobs() {
     // 摘要一行说完
     const r2 = el('div', 'r2');
     if (j.status === 'failed') r2.innerHTML = `<span style="color:var(--red)">${esc(j.error || '识别失败')}</span>`;
-    else if (busy) r2.textContent = '识别在后台进行，可以继续粘贴下一位';
+    else if (busy) r2.textContent = isShip ? '截图识别中，一张图可能有十几条记录' : '识别在后台进行，可以继续粘贴下一位';
+    else if (isShip && s?.shipment) {
+      const c = s.shipment; const bits = [`${c.total} 条记录`];
+      if (c.high) bits.push(`<span style="color:var(--green)">${c.high} 条可直接回填</span>`);
+      if (c.low) bits.push(`<span style="color:var(--amber)">${c.low} 条需确认</span>`);
+      if (c.none) bits.push(`<span style="color:var(--red)">${c.none} 条没匹配上</span>`);
+      if (c.already) bits.push(`${c.already} 条已回填过`);
+      r2.innerHTML = bits.join(' · ');
+    }
     else if (s) {
       const bits = [`${s.accounts} 个账号`];
       if (s.missing) bits.push(`<span style="color:var(--red)">待补充 ${s.missing} 项</span>`);
@@ -311,12 +401,21 @@ async function openJob(id) {
 
 /* ================================================================ 建档确认页 */
 
+/**
+ * 识别成功是默认状态，不加任何标记 —— 只标异常。
+ * 每个字段都挂一张「已识别」标签，等于把噪声铺满整个表单。
+ */
 function fld(label, path, value, m, opt = {}) {
   const has = !!(value && String(value).trim());
   const low = has && m && m.confidence && m.confidence < 0.85;
-  const w = el('div', 'f' + (has ? (low ? ' chk' : '') : ' miss'));
+  // 选填字段空着是正常状态，不该标「待补充」，也不该被 Alt+N 跳过去。
+  // 之前配送备注的 placeholder 写着「无则留空」，却又被算进待补充还抢焦点，自相矛盾。
+  const w = el('div', 'f' + (has ? (low ? ' chk' : '') : (opt.optional ? '' : ' miss')));
   const lab = el('label'); lab.append(document.createTextNode(label));
-  lab.append(el('span', 'tag ' + (has ? (low ? 'chk' : 'ok') : 'miss'), has ? (low ? '需核对' : '已识别') : '待补充'));
+  if (!has && !opt.optional) lab.append(el('span', 'tag miss', '待补充'));
+  else if (low) lab.append(el('span', 'tag chk', '需核对'));
+  if (low) w.dataset.low = '1';
+  if (opt.optional) w.dataset.optional = '1';
   const inp = el('input');
   inp.value = has ? value : ''; inp.placeholder = opt.ph || '未识别，请补充';
   inp.oninput = (e) => { setPath(path, e.target.value); recount(); };
@@ -367,7 +466,7 @@ function renderForm() {
     fld('手机号', 'recipient.phone', F.recipient.phone, rm.phone));
   gr.append(r2, fld('地址', 'recipient.address', F.recipient.address, rm.address),
     fld('配送备注', 'recipient.deliveryNote', F.recipient.deliveryNote, rm.deliveryNote,
-      { ph: '如：放菜鸟驿站 / 送上门（无则留空）' }));
+      { ph: '如：放菜鸟驿站 / 送上门（无则留空）', optional: true }));
 
   renderAlerts(); renderSrc(); recount();
   $('#agentInfo').textContent = `${S.mode === 'llm' ? S.model : '本地模拟'} · ${S.elapsedMs || 0}ms`
@@ -379,7 +478,7 @@ function renderItems() {
   const box = $('#gItems'); box.innerHTML = '';
   const usable = PRODUCTS.filter((p) => p.active !== false);
 
-  $('#itemNote').textContent = '一次合作可以寄多个产品，各自填数量';
+  $('#itemNote').textContent = F.items.length > 1 ? `${F.items.length} 个产品` : '';
 
   if (!usable.length) {
     box.append(el('div', 'muted', '还没有可选产品，去「设置 → 寄样产品」添加。'));
@@ -481,15 +580,35 @@ function mark(src) {
 }
 
 function recount() {
-  let ok = 0, miss = 0, chk = 0;
+  let miss = 0, chk = 0;
   $$('#s2 .f').forEach((f) => {
     const i = f.querySelector('input'); if (!i || i.type === 'number') return;
-    const tag = f.querySelector('.tag'); if (!tag) return;
-    if (!i.value.trim()) { f.className = 'f miss'; tag.className = 'tag miss'; tag.textContent = '待补充'; miss++; }
-    else if (f.classList.contains('chk')) { chk++; ok++; }
-    else { f.className = 'f'; tag.className = 'tag ok'; tag.textContent = '已识别'; ok++; }
+    const lab = f.querySelector('label'); if (!lab) return;
+    const old = lab.querySelector('.tag');
+    const empty = !i.value.trim();
+    const low = f.dataset.low === '1';
+    if (empty && f.dataset.optional === '1') { f.className = 'f'; old?.remove(); return; }
+    if (empty) {
+      f.className = 'f miss'; miss++;
+      if (!old || !old.classList.contains('miss')) {
+        old?.remove(); lab.append(el('span', 'tag miss', '待补充'));
+      }
+    } else if (low) {
+      f.className = 'f chk'; chk++;
+      if (!old || !old.classList.contains('chk')) {
+        old?.remove(); lab.append(el('span', 'tag chk', '需核对'));
+      }
+    } else {
+      f.className = 'f'; old?.remove();   // 填好了就把标记去掉，保持安静
+    }
   });
-  $('#cOk').textContent = ok; $('#cMiss').textContent = miss; $('#cChk').textContent = chk;
+
+  // 只显示需要动手的，「已识别 N」对操作没有帮助
+  const parts = [];
+  if (miss) parts.push(`<span style="color:var(--red)">待补充 ${miss}</span>`);
+  if (chk) parts.push(`<span style="color:var(--amber)">需核对 ${chk}</span>`);
+  $('#counts').innerHTML = parts.join(' · ') || '<span style="color:var(--green)">信息完整</span>';
+  $('#jump').style.display = (miss || chk) ? '' : 'none';
 
   const F = S.form, w = [];
   const r = F.recipient || {};
@@ -588,8 +707,14 @@ async function submitCollaboration(action) {
 
 /* ================================================================ 视频确认页 */
 
+const daysAgo = (iso) => {
+  const d = Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
+  return d <= 0 ? '今天' : `${d} 天前`;
+};
+
 function renderVideo() {
-  $('#vInfo').textContent = `本地解析 · ${V.elapsedMs}ms · 不调用模型`;
+  $('#vInfo').textContent = V.parsed.nickname
+    ? `从口令中提取到昵称「${V.parsed.nickname}」` : '口令里没有【昵称】，需要手动选';
   const box = $('#vAlerts'); box.innerHTML = '';
   (V.warnings || []).forEach((w) => {
     const a = el('div', 'alert ' + (w.level === 'error' ? 'error' : 'warn'));
@@ -601,7 +726,7 @@ function renderVideo() {
 
   b.append(el('div', 'group-t', '<span>口令原文</span><span>逐字节保存，交接时整段复制</span>'));
   b.append(el('div', 'tokenbox', esc(V.shareToken)));
-  const row = el('div', 'acts'); row.style.cssText = 'display:flex;gap:8px;margin:10px 0 18px';
+  const row = el('div'); row.style.cssText = 'display:flex;gap:8px;margin:10px 0 20px';
   const cp = el('button', 'btn sm', '复制口令');
   cp.onclick = async () => toast(await copy(V.shareToken) ? '已复制完整口令' : '复制失败');
   row.append(cp);
@@ -612,51 +737,258 @@ function renderVideo() {
   }
   b.append(row);
 
-  b.append(el('div', 'group-t', `<span>匹配到的合作</span><span>${V.parsed.nickname ? '按昵称「' + esc(V.parsed.nickname) + '」匹配' : '口令里没有昵称'}</span>`));
+  const auto = V.matches || [];
+  const shown = auto.length ? auto : (V.searchResults || []);
 
-  if (!V.matches.length) {
-    b.append(el('div', 'empty', '没有匹配到合作。可能是达人改过昵称，或这条视频对应的合作还没建。'));
-    return;
+  b.append(el('div', 'group-t', '<span>这条视频对应哪次合作</span><span>'
+    + (auto.length > 1 ? `匹配到 ${auto.length} 条，选一条`
+      : auto.length ? '' : '没自动匹配上，搜一下自己挑')
+    + '</span>'));
+
+  // 昵称匹配不上时（裸链接、达人改名）必须给手动入口，
+  // 否则「更新视频」这个动作在这里就断了 —— 只提示「请手动选择」却没有可选的东西。
+  if (!auto.length) b.append(videoSearchBox());
+
+  shown.forEach((m) => b.append(matchCard(m)));
+
+  if (!shown.length && V.searchResults) {
+    b.append(el('div', 'empty', '没搜到。换个词试试：达人名、抖音号、UID、合作码都能搜。'));
   }
-
-  V.matches.forEach((m) => {
-    const it = el('div', 'qitem' + (m.fulfillmentId === V.chosen ? ' hot' : ''));
-    it.style.cursor = 'pointer';
-    it.onclick = () => { V.chosen = m.fulfillmentId; renderVideo(); };
-    const r1 = el('div', 'r1');
-    r1.append(el('span', 'nm', esc(m.collaboration.creatorName)));
-    r1.append(el('span', 'st ' + (m.alreadyHasVideo ? 'done' : 'running'), m.alreadyHasVideo ? '已回传过' : '待回传'));
-    r1.append(el('span', 'muted', esc(m.collaboration.status)));
-    if (m.fulfillmentId === V.chosen) { const t = el('span', 'st done', '已选中'); r1.append(t); }
-    it.append(r1);
-    const items = m.collaboration.items.map((i) => `${i.productName} ×${i.quantity}`).join('、') || '未填产品';
-    const pkg = m.collaboration.packages.map((p) => p.trackingNo).join('、') || '无单号';
-    it.append(el('div', 'r2', `${esc(items)} · 建档 ${fmtDate(m.collaboration.createdAt)} · 快递 ${esc(pkg)}`));
-    b.append(it);
-  });
 
   const foot = el('div'); foot.style.cssText = 'display:flex;gap:10px;margin-top:16px';
   const submit = el('button', 'btn primary', '确认回传');
   submit.disabled = !V.chosen;
-  submit.onclick = async () => {
-    submit.disabled = true;
-    try {
-      const r = await api('POST', '/api/video/submit', { shareToken: V.shareToken, fulfillmentId: V.chosen });
-      $('#doneTitle').textContent = '视频已记录';
-      $('#doneSub').textContent = r.collaboration.status === '已完成'
-        ? '该合作的所有账号都已回传，合作自动标记为已完成。'
-        : '还有账号未回传，会继续出现在待办里。';
-      const box = $('#recap'); box.innerHTML = '';
-      [['达人', r.collaboration.creatorName], ['账号', r.fulfillment.account?.nickname || '—'],
-        ['拍摄进度', r.fulfillment.filmingProgress], ['合作状态', r.collaboration.status]]
-        .forEach(([k, v]) => box.append(el('div', null, `<span>${esc(k)}</span><b>${esc(v)}</b>`)));
-      showStage('s3'); V = null; loadTodos(); loadRecords(); window.scrollTo({ top: 0 });
-    } catch (e) { toast(e.message); submit.disabled = false; }
-  };
+  submit.onclick = () => submitVideo(submit);
   const cancel = el('button', 'btn', '取消');
   cancel.onclick = () => { showStage('s1'); V = null; };
   foot.append(submit, cancel); b.append(foot);
 }
+
+/* 搜索框的 DOM 复用同一个节点。renderVideo 是整块重绘的，
+   每次新建输入框会把焦点和已输入的内容打掉，选一条就得重新打字。 */
+function videoSearchBox() {
+  if (!V.searchEl) {
+    const wrap = el('div', 'vsearch');
+    const input = el('input');
+    input.type = 'search';
+    input.placeholder = '搜达人名 / 抖音号 / UID / 合作码';
+    input.value = V.searchQ || '';
+    const hint = el('div', 'dim');
+    hint.style.cssText = 'font-size:12px;margin-top:6px';
+
+    let timer = null;
+    const run = async () => {
+      const q = input.value.trim();
+      V.searchQ = q;
+      if (!q) { V.searchResults = null; hint.textContent = ''; renderVideo(); return; }
+      hint.textContent = '搜索中…';
+      try {
+        const r = await api('GET', `/api/fulfillments/search?q=${encodeURIComponent(q)}`);
+        V.searchResults = r.matches;
+        hint.textContent = r.matches.length ? `找到 ${r.matches.length} 条` : '';
+      } catch (e) { hint.textContent = e.message; V.searchResults = []; }
+      renderVideo();
+    };
+    input.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 250); };
+
+    wrap.append(input, hint);
+    V.searchEl = wrap;
+    // 让商务一进来就能直接打字，不用先找输入框
+    queueMicrotask(() => input.focus());
+  }
+  return V.searchEl;
+}
+
+function matchCard(m) {
+  const cb = m.collaboration, acc = m.account || {};
+  const on = m.fulfillmentId === V.chosen;
+  const card = el('div', 'mcard' + (on ? ' on' : '') + (!on && m.alreadyHasVideo ? ' warn' : ''));
+  card.onclick = () => { V.chosen = m.fulfillmentId; renderVideo(); };
+  card.append(el('div', 'radio'));
+
+  const body = el('div');
+  const hd = el('div', 'hd');
+  // 达人名可能没填（表单里是选填），空标题的卡片没法认，退回用账号昵称
+  hd.append(el('b', null, esc(cb.creatorName || acc.nickname || '未命名达人')));
+  hd.append(el('span', 'st ' + (m.alreadyHasVideo ? 'done' : 'running'),
+    m.alreadyHasVideo ? '该账号已回传过，会被覆盖' : m.filmingProgress));
+  hd.append(el('span', 'st queued', esc(cb.status)));
+  if (cb.accountCount > 1) {
+    hd.append(el('span', 'muted', `本次共 ${cb.accountCount} 个账号，已回传 ${cb.publishedCount}`));
+  }
+  body.append(hd);
+
+  // 一次合作可能挂多个账号，必须让商务看清这条对应的是哪个号
+  body.append(el('div', 'sub',
+    `抖音号 ${esc(acc.douyinId || '—')} · UID ${esc(acc.uid || '—')} · 合作码 ${esc(acc.cooperationCode || '—')}`));
+
+  const dl = el('dl');
+  const add = (k, v) => { dl.append(el('dt', null, k), el('dd', null, v)); };
+  add('寄样产品', cb.items.length
+    ? cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('、')
+    : '<span class="dim">未填</span>');
+  add('收件信息', cb.recipient?.name
+    ? `${esc(cb.recipient.name)} ${esc(cb.recipient.phone || '')}<br><span class="dim">${esc(cb.recipient.address || '')}</span>`
+    : '<span class="dim">未填</span>');
+  add('快递', cb.packages.length
+    ? cb.packages.map((p) => `${esc(p.carrier)} ${esc(p.trackingNo)}`).join('<br>')
+    : '<span class="dim">未回填</span>');
+  add('建档', `${fmtDate(cb.createdAt)} · ${daysAgo(cb.createdAt)}`
+    + (cb.notifiedAt ? ' · 已告知达人' : '') + ` · 归属 ${esc(cb.ownerName)}`);
+  body.append(dl);
+
+  card.append(body);
+  return card;
+}
+
+async function submitVideo(submit) {
+  submit.disabled = true;
+  try {
+    const r = await api('POST', '/api/video/submit', { shareToken: V.shareToken, fulfillmentId: V.chosen });
+    $('#doneTitle').textContent = '视频已记录';
+    $('#doneSub').textContent = r.collaboration.status === '已完成'
+      ? '该合作的所有账号都已回传，合作自动标记为已完成。'
+      : '还有账号未回传，会继续出现在待办里。';
+    const box = $('#recap'); box.innerHTML = '';
+    [['达人', r.collaboration.creatorName], ['账号', r.fulfillment.account?.nickname || '—'],
+      ['拍摄进度', r.fulfillment.filmingProgress], ['合作状态', r.collaboration.status]]
+      .forEach(([k, v]) => box.append(el('div', null, `<span>${esc(k)}</span><b>${esc(v)}</b>`)));
+    showStage('s3'); V = null; loadTodos(); loadRecords(); window.scrollTo({ top: 0 });
+  } catch (e) { toast(e.message); submit.disabled = false; }
+}
+
+/* ================================================================ 发货截图批量回填 */
+
+let SB = null;   // { jobId, matched[], picks: Map<index, collaborationId|''>, checked: Set<index> }
+
+async function openShipment(jobId) {
+  const { job } = await api('GET', '/api/jobs/' + jobId);
+  if (!job.result?.matched) return;
+  // 可选合作用于「没匹配上」的手动指定
+  const { collaborations } = await api('GET', '/api/collaborations?scope=mine');
+  SB = {
+    jobId,
+    matched: job.result.matched,
+    candidates: collaborations.filter((c) => ['待寄样', '已寄样'].includes(c.status)),
+    picks: new Map(), checked: new Set(),
+  };
+  SB.matched.forEach((m, i) => {
+    SB.picks.set(i, m.best?.collaborationId || '');
+    if (m.level === 'high' && !m.already) SB.checked.add(i);   // 高置信默认勾选
+  });
+  showStage('sb'); renderShipment(); window.scrollTo({ top: 0 });
+}
+
+function renderShipment() {
+  const box = $('#sbBody'); box.innerHTML = '';
+  const c = SB.matched.reduce((a, m) => { a[m.already ? 'already' : m.level]++; return a; },
+    { high: 0, low: 0, none: 0, already: 0 });
+  $('#sbTag').textContent = `${SB.matched.length} 条记录`;
+  const parts = [];
+  if (c.high) parts.push(`<span style="color:var(--green)">可直接回填 ${c.high}</span>`);
+  if (c.low) parts.push(`<span style="color:var(--amber)">需确认 ${c.low}</span>`);
+  if (c.none) parts.push(`<span style="color:var(--red)">没匹配上 ${c.none}</span>`);
+  if (c.already) parts.push(`已回填 ${c.already}`);
+  $('#sbCounts').innerHTML = parts.join(' · ');
+
+  SB.matched.forEach((m, i) => {
+    const row = m.row;
+    const pick = SB.picks.get(i);
+    const on = SB.checked.has(i);
+    const it = el('div', 'srow' + (m.already ? ' already' : on ? ' on' : m.level === 'none' ? ' none' : ''));
+
+    const top = el('div', 'top');
+    const ck = el('input', 'ck'); ck.type = 'checkbox';
+    ck.checked = on; ck.disabled = m.already || !pick;
+    ck.onchange = () => { ck.checked ? SB.checked.add(i) : SB.checked.delete(i); renderShipment(); };
+    top.append(ck);
+
+    const info = el('div', 'info');
+    const l1 = el('div', 'l1');
+    l1.append(el('b', null, esc(row.recipientName || '（无姓名）')));
+    l1.append(el('span', 'muted', esc(row.phoneMasked || '')));
+    if (m.already) l1.append(el('span', 'st done', '已回填过'));
+    else if (m.level === 'high') l1.append(el('span', 'st done', '高置信'));
+    else if (m.level === 'low') l1.append(el('span', 'st p2', m.ambiguous ? '多条相近，请确认' : '低置信'));
+    else l1.append(el('span', 'st failed', '没匹配上'));
+    info.append(l1);
+
+    const goods = row.products.map((p) => `${esc(p.name)} ×${p.quantity}`).join('、') || '无商品';
+    info.append(el('div', 'l2',
+      `${esc(row.address || '无地址')}<br>${goods} · <b>${esc(row.carrier || '')} ${esc(row.trackingNo || '无单号')}</b>`));
+
+    // 匹配到哪次合作 —— 可以改
+    const arrow = el('div', 'arrow');
+    arrow.append(el('span', 'muted', '回填到'));
+    const sel = el('select');
+    sel.append(el('option', null, '— 不回填 —'));
+    const pool = [...SB.candidates];
+    (m.matches || []).forEach((x) => { if (!pool.some((p) => p.id === x.collaborationId)) pool.unshift(x.collaboration); });
+    pool.forEach((cb) => {
+      const hit = (m.matches || []).find((x) => x.collaborationId === cb.id);
+      const o = el('option', null,
+        `${esc(cb.creatorName)} · ${esc(cb.recipient?.name || '—')} · ${cb.items.map((x) => x.productName).join('/') || '未填产品'}`
+        + (hit ? `（${hit.score} 分）` : ''));
+      o.value = cb.id; sel.append(o);
+    });
+    sel.value = pick || '';
+    sel.disabled = m.already;
+    sel.onchange = () => {
+      SB.picks.set(i, sel.value);
+      if (!sel.value) SB.checked.delete(i); else SB.checked.add(i);
+      renderShipment();
+    };
+    arrow.append(sel);
+    if (m.best && pick === m.best.collaborationId) arrow.append(el('span', 'why', m.best.why.join('、')));
+    info.append(arrow);
+
+    top.append(info); it.append(top); box.append(it);
+  });
+
+  const n = [...SB.checked].filter((i) => SB.picks.get(i)).length;
+  $('#sbWarn').textContent = n ? `将回填 ${n} 条快递单号` : '还没有勾选任何记录';
+  $('#sbConfirm').disabled = !n;
+  $('#sbConfirm').textContent = n ? `确认回填 ${n} 条` : '确认回填';
+}
+
+$('#sbAll').onclick = () => {
+  SB.matched.forEach((m, i) => { if (m.level === 'high' && !m.already && SB.picks.get(i)) SB.checked.add(i); });
+  renderShipment();
+};
+$('#sbClose').onclick = () => { showStage('s1'); SB = null; loadJobs(); };
+$('#sbDiscard').onclick = async () => {
+  if (!confirm('丢弃这张截图的识别结果？已回填的不受影响。')) return;
+  await api('DELETE', '/api/jobs/' + SB.jobId).catch(() => {});
+  showStage('s1'); SB = null; loadJobs(); toast('已丢弃');
+};
+
+$('#sbConfirm').onclick = async () => {
+  const items = [...SB.checked]
+    .filter((i) => SB.picks.get(i))
+    .map((i) => ({
+      collaborationId: SB.picks.get(i),
+      carrier: SB.matched[i].row.carrier,
+      trackingNo: SB.matched[i].row.trackingNo,
+    }));
+  if (!items.length) return;
+  $('#sbConfirm').disabled = true;
+  try {
+    // 全部处理完才删任务，留一条没弄的下次还能进来
+    const allDone = items.length === SB.matched.filter((m) => !m.already).length;
+    const r = await api('POST', '/api/shipments/confirm', { items, jobId: allDone ? SB.jobId : null });
+    $('#doneTitle').textContent = `已回填 ${r.done.length} 条快递单号`;
+    $('#doneSub').textContent = r.failed.length
+      ? `${r.failed.length} 条失败，可回队列重试。`
+      : '这些合作已变为「已寄样」，去待办里复制物流信息发给达人。';
+    const box = $('#recap'); box.innerHTML = '';
+    r.done.forEach((d) => box.append(el('div', null,
+      `<span>${esc(d.creatorName)}</span><b>${esc(d.trackingNo)} · ${esc(d.status)}</b>`)));
+    r.failed.forEach((f) => box.append(el('div', null,
+      `<span style="color:var(--red)">${esc(f.trackingNo)}</span><b>${esc(f.error)}</b>`)));
+    showStage('s3'); SB = null;
+    loadJobs(); loadTodos(); loadRecords(); window.scrollTo({ top: 0 });
+  } catch (e) { toast(e.message); $('#sbConfirm').disabled = false; }
+};
 
 /* ================================================================ 待办 */
 
@@ -1074,9 +1406,12 @@ $('#saveUser').onclick = async () => {
   const name = $('#uName').value.trim();
   if (!name) { msg('#userMsg', '请填写姓名', false); return; }
   try {
-    await api('PUT', '/api/settings', { user: { name, role: curRole, phone: $('#uPhone').value.trim() } });
+    const r = await api('PUT', '/api/settings', { user: { name, role: curRole, phone: $('#uPhone').value.trim() } });
+    // 只在这里把身份钉进本浏览器。别在 refreshConfig 里做 ——
+    // 那样一个新开的浏览器会自动latch住全局默认用户，等于又回到共享身份。
+    if (r.settings?.user?.id) setMyUserId(r.settings.user.id);
     await refreshConfig(); loadJobs(); loadTodos(); loadRecords();
-    msg('#userMsg', '已保存');
+    msg('#userMsg', '已保存，这台浏览器之后都以「' + name + '」的身份操作');
   } catch (e) { msg('#userMsg', e.message, false); }
 };
 
