@@ -17,46 +17,61 @@ process.env.NODE_ENV = 'test';
 for (const k of ['LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY']) delete process.env[k];
 
 const { server } = await import('../server.js');
+const { makeApi, bootstrap, loginAs } = await import('./helpers/login.js');
 
-let BASE;
+let BASE, api, PRE_STATE;
 before(async () => {
   await new Promise((r) => server.listen(0, r));
   BASE = `http://127.0.0.1:${server.address().port}`;
+  api = makeApi(BASE);
+  // 先记下初始化前的状态，再完成初始化 —— 后面所有用例都带着这个会话跑
+  PRE_STATE = await api('GET', '/api/auth/state', null, '');
+  const { me } = await bootstrap(BASE, { name: '商务甲', role: 'business' });
+  const { cookie } = await loginAs(BASE, { userId: me.id });
+  api.setCookie(cookie);
 });
 after(async () => {
   await new Promise((r) => server.close(r));
   try { rmSync(DIR, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-const api = async (method, path, body) => {
-  const res = await fetch(BASE + path, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return { status: res.status, ...(await res.json().catch(() => ({}))) };
-};
-
 /* ================================================================ */
 
 describe('身份守卫', () => {
-  test('未设置身份时写操作返回 428', async () => {
-    const r = await api('POST', '/api/jobs', { rawText: 'x' });
-    assert.equal(r.status, 428);
-    assert.match(r.error, /设置/);
+  test('没有会话时业务接口一律 401', async () => {
+    for (const p of ['/api/config', '/api/jobs', '/api/collaborations', '/api/products']) {
+      assert.equal((await api('GET', p, null, '')).status, 401, `${p} 没被拦住`);
+    }
   });
 
-  test('config 提示需要初始化', async () => {
-    const c = await api('GET', '/api/config');
-    assert.equal(c.needsSetup, true);
-    assert.equal(c.me, null);
+  test('未初始化时提示需要设置团队口令', () => {
+    assert.equal(PRE_STATE.needsBootstrap, true);
   });
 
-  test('保存用户设置后身份生效', async () => {
-    await api('PUT', '/api/settings', { user: { name: '商务甲', role: 'business', phone: '' } });
+  test('初始化后身份生效', async () => {
     const c = await api('GET', '/api/config');
-    assert.equal(c.needsSetup, false);
     assert.equal(c.me.name, '商务甲');
+  });
+
+  test('口令不对进不来', async () => {
+    const r = await api('POST', '/api/auth/login', { passphrase: '猜的' }, '');
+    assert.equal(r.status, 401);
+  });
+
+  test('伪造的会话 cookie 无效', async () => {
+    const forged = 'naimeng_session=eyJ1IjoidS0wMDAwMSIsImV4cCI6OTk5OTk5OTk5OTk5OX0.fakesig';
+    assert.equal((await api('GET', '/api/config', null, forged)).status, 401);
+  });
+
+  test('旧的 X-User-Id 请求头已经不管用', async () => {
+    const res = await fetch(BASE + '/api/config', { headers: { 'X-User-Id': 'u-00001' } });
+    assert.equal(res.status, 401, '自报身份的老路子必须彻底堵死');
+  });
+
+  test('bootstrap 只能用一次', async () => {
+    const r = await api('POST', '/api/auth/bootstrap',
+      { passphrase: 'another-pass', name: '冒充者', role: 'business' }, '');
+    assert.equal(r.status, 409);
   });
 
   test('角色非法被拒', async () => {
@@ -201,11 +216,11 @@ describe('归属过滤与脱敏', () => {
     const mineBefore = (await api('GET', '/api/creators')).creators.length;
     assert.ok(mineBefore >= 1);
 
-    await api('PUT', '/api/settings', { user: { name: '商务乙', role: 'business', phone: '' } });
-    const mine = (await api('GET', '/api/creators')).creators;
+    const yi = await loginAs(BASE, { name: '商务乙', role: 'business' });
+    const mine = (await api('GET', '/api/creators', null, yi.cookie)).creators;
     assert.equal(mine.length, 0, '新身份下不该看到别人的达人');
 
-    const all = (await api('GET', '/api/creators?scope=all')).creators;
+    const all = (await api('GET', '/api/creators?scope=all', null, yi.cookie)).creators;
     assert.ok(all.length >= 1);
     const other = all.find((c) => c.masked);
     assert.ok(other, '他人记录应被标记 masked');

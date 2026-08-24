@@ -1,8 +1,16 @@
 /**
- * 商务动作入口 —— 前端逻辑。
+ * 耐萌 · 前端逻辑
  *
- * 三个入口：录入（统一输入框，自动路由）、我的待办、记录查询。
- * 状态由动作驱动，界面上没有让人手选状态的下拉框。
+ * 两个入口：工作台、合作记录。
+ *
+ * 三条不动的规则：
+ *   叙事主体是「一次合作」，不是一个达人
+ *   状态由动作驱动 —— 界面上没有任何让人手选状态的下拉框
+ *   视频口令逐字节保存，不 trim 不清洗
+ *
+ * 界面上只有一个确认容器（#drawer）。建档、视频回传、发货截图、合作详情
+ * 全部用它，左边是系统的判断，右边恒为证据。以前这三类各有各的容器和布局，
+ * 同样一件事要学三遍。
  */
 
 /* ================================================================ 基础 */
@@ -13,31 +21,38 @@ const el = (t, c, h) => { const e = document.createElement(t); if (c) e.classNam
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtDate = (s) => (s ? new Date(s).toLocaleDateString('zh-CN') : '—');
 const fmtTime = (s) => (s ? new Date(s).toLocaleString('zh-CN') : '—');
+const daysAgo = (iso) => {
+  const d = Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
+  return d <= 0 ? '今天' : `${d} 天前`;
+};
 
 let CFG = null;          // /api/config
 let PRODUCTS = [];       // 产品列表
 let S = null;            // 当前建档会话
 let V = null;            // 当前视频会话
+let SB = null;           // 当前发货截图会话
 let t0 = 0, draftId = null, jobId = null, poller = null, routeTimer = null, lastRoute = null;
 
-function toast(msg) { const t = el('div', 'toast', esc(msg)); document.body.append(t); setTimeout(() => t.remove(), 2800); }
+function toast(msg) { const t = el('div', 'toast', esc(msg)); document.body.append(t); setTimeout(() => t.remove(), 3200); }
 
-/* 本浏览器的身份。存在 localStorage 而不是服务端的全局设置里，
-   这样同一台服务器上四个商务各用各的浏览器，身份互不覆盖。 */
-const UID_KEY = 'naimeng.userId';
-const myUserId = () => { try { return localStorage.getItem(UID_KEY) || ''; } catch { return ''; } };
-const setMyUserId = (id) => { try { id ? localStorage.setItem(UID_KEY, id) : localStorage.removeItem(UID_KEY); } catch { /* 隐私模式忽略 */ } };
-
+/* 身份不再由前端自报。
+   以前是把 userId 存 localStorage 再塞进 X-User-Id，任何人改个请求头
+   就能变成别人 —— 局域网上线后那些按归属拦截的 403 会形同虚设。
+   现在身份在服务端签名的 HttpOnly cookie 里，前端读不到也改不了，
+   请求只要带上 credentials 即可。 */
 async function api(method, path, body) {
-  const headers = { 'Content-Type': 'application/json' };
-  const uid = myUserId();
-  if (uid) headers['X-User-Id'] = uid;
   const res = await fetch(path, {
-    method, headers,
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({ error: '响应解析失败' }));
-  if (!res.ok) { const e = new Error(data.error || '请求失败'); e.data = data; e.status = res.status; throw e; }
+  if (!res.ok) {
+    // 会话过期或被踢下线时直接回登录屏，而不是抛一堆看不懂的错误
+    if (res.status === 401 && !path.startsWith('/api/auth/')) { showLogin(); }
+    const e = new Error(data.error || '请求失败'); e.data = data; e.status = res.status; throw e;
+  }
   return data;
 }
 
@@ -49,19 +64,6 @@ async function copy(text) {
     const ok = document.execCommand('copy'); ta.remove(); return ok;
   }
 }
-
-/* ================================================================ 样例 */
-
-const SAMPLES = [
-  { n: '标准资料', t: `账号名称：示例达人甲\n账号id：100000001\n带货方式：短视频\n账号uid20000000001\n合作码：30000000001\n联系方式：13800138000\n详细地址：福建省南安市示范镇示范村1组100号\n收件人:张某某\n-` },
-  { n: '一址多号', t: `地址：上海市松江区示范镇示范园区A栋一楼 13800138001 小乙\n示例宠物馆\nUID: 4000000000000001\n示例优选\n抖音号：10000000002\nUID：4000000000000002\n示例铲屎官\n抖音号：K9petlife\nUID：4000000000000003` },
-  { n: 'UID/合作码同形', t: `宝子\nid: Demoacct119\nuid: 20000000002\n合作码: 30000000002\n地址: 安徽省淮南市田家庵区示范小区2栋1205 小甲 13800138002` },
-  { n: '混入视频号', t: `示例小戏精\n抖音UID4000000000000004\n视频号id sphDemo000000001\n快手号5000000001\n示例小戏精 13800138003 浙江省杭州市临平区示范街道示范小区1-1-101（放菜鸟驿站）` },
-  { n: '含分享口令', t: `抖音：示例达人乙\n抖音号：demoacctzhao\n抖音链接：1- 长按复制此条消息，打开抖音搜索，查看TA的更多作品。 https://v.douyin.com/EXAMPLE01/ 8@9.com :5pm\nUID：20000000003\n合作码：30000000003\n王某某13800138004黑龙江省齐齐哈尔市讷河市示范小区1号楼1单元101` },
-  { n: '合作码前导零', t: `抖音名：示例达人丙\n抖音号：10000000003\n合作码：04000000001\nUID：4000000000000005\n收件地址： 李某某，手机号码：13800138007，所在地区：江苏省苏州市吴江区 松陵镇示范小区1幢` },
-  { n: '含宠物类别', t: `【寄样资料完善】\n抖音名字：示例达人丁\n抖音号：sample20250101\n抖音uid：4000000000000007\n宠物类别（猫/狗）：狗\n合作码:30000000005\n寄样信息地址： 四川省绵阳市涪城区 示范7组100菜鸟驿站\n收件人：李先生\n手机号码：13800138006` },
-  { n: '视频口令', t: `0.58 复制打开抖音，看看【示例达人甲的作品】新品测试内容 https://v.douyin.com/EXAMPLE01/ :9pm KWM:/ 01/13 z@T.Lw` },
-];
 
 const PRESETS = [
   { n: 'DeepSeek', p: 'DeepSeek', b: 'https://api.deepseek.com/v1', m: 'deepseek-chat' },
@@ -83,21 +85,96 @@ const V_PRESETS = [
 boot();
 
 async function boot() {
-  await refreshConfig();
-  await loadProducts();
-
-  $('#chips').append(...SAMPLES.map((s) => {
-    const b = el('button', null, esc(s.n));
-    b.onclick = () => { $('#raw').value = s.t; $('#raw').focus(); scheduleRoute(); };
-    return b;
-  }));
   $('#presets').append(...PRESETS.map((p) => mkPreset(p, 'm')));
   $('#vPresets').append(...V_PRESETS.map((p) => mkPreset(p, 'v')));
 
-  loadJobs(); loadTodos(); loadRecords();
-  if (CFG.needsSetup) { openSettings('user'); toast('先填一下你的姓名和角色'); }
-  else $('#raw').focus();
+  // 先看有没有有效会话；没有就停在登录屏，不去拉任何业务数据
+  try {
+    await refreshConfig();
+  } catch (e) {
+    if (e.status === 401) return showLogin();
+    throw e;
+  }
+  await afterLogin();
 }
+
+async function afterLogin() {
+  $('#login').classList.remove('on');
+  await loadProducts();
+  loadDesk(); loadRecords();
+}
+
+/* ================================================================ 登录 */
+
+const lErr = (msg) => { $('#lErr').textContent = msg || ''; };
+const lStep = (id) => $$('.lstep').forEach((s) => s.classList.toggle('on', s.id === id));
+
+async function showLogin() {
+  $('#login').classList.add('on');
+  lErr('');
+  let st;
+  try { st = await api('GET', '/api/auth/state'); } catch { st = { needsBootstrap: false }; }
+  if (st.needsBootstrap) {
+    $('#lSub').textContent = '首次使用 —— 设置团队口令';
+    lStep('lBoot');
+    $('#bPass').focus();
+  } else {
+    $('#lSub').textContent = '输入团队口令';
+    lStep('lPass');
+    $('#lPassInput').focus();
+  }
+}
+
+async function enterWith(payload) {
+  lErr('');
+  try {
+    const r = await api('POST', '/api/auth/login', payload);
+    if (r.needPick) {
+      $('#lSub').textContent = '口令正确 —— 选一下你是谁';
+      const box = $('#lUsers'); box.innerHTML = '';
+      r.users.forEach((u) => {
+        const b = el('button', null, `${esc(u.name)} · ${esc((r.roles.find((x) => x.id === u.role) || {}).name || '')}`);
+        b.onclick = () => enterWith({ passphrase: passCache, userId: u.id });
+        box.append(b);
+      });
+      if (!r.users.length) box.append(el('div', 'dim', '还没有成员，下面填姓名进入'));
+      lStep('lPick');
+      return;
+    }
+    await refreshConfig();
+    await afterLogin();
+    toast(`欢迎，${r.me.name}`);
+  } catch (e) { lErr(e.message); }
+}
+
+let passCache = '';
+
+$('#lPassGo').onclick = () => {
+  passCache = $('#lPassInput').value;
+  if (!passCache) { lErr('请输入团队口令'); return; }
+  enterWith({ passphrase: passCache });
+};
+$('#lPassInput').onkeydown = (e) => { if (e.key === 'Enter') $('#lPassGo').click(); };
+
+$('#lNewGo').onclick = () => {
+  const name = $('#lName').value.trim();
+  if (!name) { lErr('请填写姓名'); return; }
+  enterWith({ passphrase: passCache, name, role: $('#lRole').value });
+};
+
+$('#bGo').onclick = async () => {
+  lErr('');
+  const passphrase = $('#bPass').value;
+  const name = $('#bName').value.trim();
+  if (passphrase.length < 6) { lErr('团队口令至少 6 位'); return; }
+  if (!name) { lErr('请填写你的姓名'); return; }
+  try {
+    const r = await api('POST', '/api/auth/bootstrap', { passphrase, name, role: $('#bRole').value });
+    await refreshConfig();
+    await afterLogin();
+    toast(`已初始化，欢迎 ${r.me.name}`);
+  } catch (e) { lErr(e.message); }
+};
 
 function mkPreset(p, prefix) {
   const b = el('button', null, esc(p.n));
@@ -115,15 +192,42 @@ async function refreshConfig() {
   else { b.className = 'badge mock'; b.textContent = '本地模拟识别'; }
   const roleName = (CFG.roles.find((r) => r.id === CFG.me?.role) || {}).name || '';
   $('#whoAmI').innerHTML = CFG.me
-    ? `当前身份：<b>${esc(CFG.me.name)}</b> · ${esc(roleName)}`
+    ? `${esc(CFG.me.name)} · ${esc(roleName)}`
     : '<b style="color:var(--red)">未设置身份</b>';
-  $('#setupNote').style.display = CFG.needsSetup ? 'block' : 'none';
-  fillSettings(); updateShipUI();
+  $('#setupNote').style.display = 'none';   // 身份已由登录决定，设置页不再承担初始化
+  applyRole();
+  fillSettings();
 }
 
 async function loadProducts() {
   PRODUCTS = (await api('GET', '/api/products?all=1')).products;
   renderProductList();
+}
+
+/**
+ * 角色裁剪。
+ *
+ * 以前四个角色看到的界面完全一样，包括 API Key 设置 —— 仓库不录达人，
+ * 运营不寄样，让他们对着一个粘贴框发呆没有意义，把密钥摆在那儿也不合适。
+ */
+const roleOf = () => CFG?.me?.role || 'business';
+const canIntake = () => roleOf() === 'business';
+const canConfigModel = () => roleOf() === 'business';
+
+function applyRole() {
+  const r = roleOf();
+  $('#paster').style.display = (r === 'operations') ? 'none' : '';
+  // 仓库只上传发货截图，不录达人资料
+  $('#raw').style.display = canIntake() ? '' : 'none';
+  $('#go').style.display = canIntake() ? '' : 'none';
+  $('#pasteHint').textContent = canIntake()
+    ? '粘贴微信内容 —— 达人资料、视频口令、发货截图都往这里放，系统自己分'
+    : '上传仓库的发货列表截图，识别后批量回填快递单号';
+  $$('.settings nav button').forEach((b) => {
+    if (b.dataset.panel === 'model' || b.dataset.panel === 'vision') {
+      b.style.display = canConfigModel() ? '' : 'none';
+    }
+  });
 }
 
 /* ================================================================ 导航 */
@@ -134,51 +238,82 @@ $$('.tabs button').forEach((b) => {
     b.classList.add('on');
     $$('.page').forEach((p) => p.classList.remove('on'));
     $('#p-' + b.dataset.tab).classList.add('on');
-    if (b.dataset.tab === 'records') loadRecords();
-    if (b.dataset.tab === 'todos') loadTodos();
+    if (b.dataset.tab === 'records') loadRecords(); else loadDesk();
   };
 });
 const goTab = (n) => document.querySelector(`.tabs button[data-tab="${n}"]`).click();
 
-/**
- * s2 是覆盖层（confirm overlay），s1/sv/s3 是页面内区块。
- * 打开覆盖层时底层保持 s1，关闭后直接回到队列，不用重新渲染。
- */
-const showStage = (n) => {
-  const overlay = n === 's2' || n === 'sb';
-  $('#s2').classList.toggle('on', n === 's2');
-  $('#sb').classList.toggle('on', n === 'sb');
-  document.body.style.overflow = overlay ? 'hidden' : '';
-  for (const k of ['s1', 'sv', 's3']) {
-    $('#' + k).style.display = (k === (overlay ? 's1' : n) ? (k === 's1' ? 'grid' : 'block') : 'none');
-  }
-};
+/* ================================================================ 统一抽屉 */
 
-/* ================================================================ 输入路由 */
+let onDrawerClose = null;
+
+/**
+ * 三类确认与合作详情共用这一个容器。
+ * left 是系统的判断，right 恒为证据 —— 商务只要学一次「往右看」。
+ */
+function openDrawer({ title, tags = [], right = null, foot = [], onClose = null }) {
+  const h = $('#drHead'); h.innerHTML = '';
+  h.append(el('b', null, esc(title)));
+  tags.forEach((t) => h.append(el('span', 'st ' + (t.cls || 'queued'), esc(t.text))));
+  h.append(el('span', 'grow'));
+  const x = el('button', 'btn sm', '关闭');
+  x.onclick = closeDrawer;
+  h.append(x);
+
+  $('#drLeft').innerHTML = '';
+  $('#drRight').innerHTML = '';
+  $('#drRight').style.display = right === false ? 'none' : '';
+  $('.dr-b').style.gridTemplateColumns = right === false ? '1fr' : '';
+
+  const f = $('#drFoot'); f.innerHTML = '';
+  foot.forEach((n) => f.append(n));
+  f.style.display = foot.length ? '' : 'none';
+
+  onDrawerClose = onClose;
+  $('#drawer').classList.add('on');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeDrawer() {
+  $('#drawer').classList.remove('on');
+  document.body.style.overflow = '';
+  const cb = onDrawerClose; onDrawerClose = null;
+  if (cb) cb();
+}
+const drawerOpen = () => $('#drawer').classList.contains('on');
+
+$('#drawer').onclick = (e) => { if (e.target.id === 'drawer') closeDrawer(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawerOpen()) closeDrawer(); });
+
+/* ================================================================ 粘贴条 */
 
 const KIND_LABEL = { intake: '建档 / 新合作', video: '视频回传', shipment: '发货截图', unknown: '无法判断' };
+
+const expand = () => { $('#paster').classList.add('exp'); $('#raw').focus(); };
+$('#pasteHint').onclick = expand;
+$('#paster').addEventListener('focusin', () => $('#paster').classList.add('exp'));
+$('#clearRaw').onclick = () => {
+  $('#raw').value = ''; $('#routeBar').classList.remove('on'); lastRoute = null;
+  setTip(''); $('#paster').classList.remove('exp');
+};
 
 $('#raw').addEventListener('input', scheduleRoute);
 $('#raw').addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); submitInput(); }
 });
 
-function scheduleRoute() {
-  clearTimeout(routeTimer);
-  routeTimer = setTimeout(doRoute, 260);
-}
+function scheduleRoute() { clearTimeout(routeTimer); routeTimer = setTimeout(doRoute, 260); }
 
 async function doRoute() {
   const text = $('#raw').value;
   const bar = $('#routeBar');
-  if (!text.trim()) { bar.classList.add('off'); lastRoute = null; return; }
+  if (!text.trim()) { bar.classList.remove('on'); lastRoute = null; return; }
   try {
     lastRoute = await api('POST', '/api/route', { rawText: text });
-    bar.classList.remove('off');
-    bar.className = 'routebar' + (lastRoute.confidence === 'low' || lastRoute.kind === 'unknown' ? ' warn' : '');
+    bar.className = 'routebar on' + (lastRoute.confidence === 'low' || lastRoute.kind === 'unknown' ? ' warn' : '');
     $('#routeKind').textContent = KIND_LABEL[lastRoute.kind] || lastRoute.kind;
     $('#routeReason').textContent = [lastRoute.reason, lastRoute.note].filter(Boolean).join(' ｜ ');
-  } catch { bar.classList.add('off'); }
+  } catch { bar.classList.remove('on'); }
 }
 
 $('#go').onclick = submitInput;
@@ -188,9 +323,7 @@ async function submitInput() {
   if (!text) { setTip('请先粘贴内容', true); return; }
   const forced = $('#routeOverride').value;
   const kind = forced || lastRoute?.kind || 'intake';
-
-  if (kind === 'shipment') { setTip('发货截图识别还没做，先在待办里手动回填快递单号。', true); return; }
-  if (kind === 'unknown') { setTip('判断不出这段内容属于哪一类，请用右上角下拉手动指定。', true); return; }
+  if (kind === 'unknown') { setTip('判断不出这段内容属于哪一类，请用右边的下拉手动指定。', true); return; }
 
   $('#go').disabled = true;
   try {
@@ -204,216 +337,298 @@ async function submitInput() {
 
 function setTip(msg, isErr) {
   $('#tip').className = 'tip' + (isErr ? ' err' : '');
-  $('#tip').textContent = msg;
+  $('#tip').textContent = msg || '';
+}
+
+function resetPaster() {
+  $('#raw').value = ''; $('#routeBar').classList.remove('on'); lastRoute = null;
+  $('#paster').classList.remove('exp');
 }
 
 async function enqueueIntake(text) {
   await api('POST', '/api/jobs', { rawText: text });
-  $('#raw').value = ''; $('#raw').focus();
-  $('#routeBar').classList.add('off'); lastRoute = null;
-  setTip('已加入队列，识别完成后在右侧确认。可以继续粘下一位。');
-  loadJobs();
+  resetPaster();
+  setTip('');
+  toast('已加入队列，可以继续粘下一位');
+  loadDesk();
+  $('#raw').focus();
 }
 
 async function submitVideoToken(text) {
   V = await api('POST', '/api/video/parse', { rawText: text });
   V.shareToken = text;
   V.chosen = V.matches.find((m) => !m.alreadyHasVideo)?.fulfillmentId || V.matches[0]?.fulfillmentId || '';
-  $('#raw').value = ''; $('#routeBar').classList.add('off'); lastRoute = null;
-  showStage('sv'); renderVideo();
-  window.scrollTo({ top: 0 });
+  resetPaster();
+  openVideoDrawer();
 }
 
-/* ================================================================ 发货截图上传 */
+/* ---------- 截图 ---------- */
 
-let pendingImage = null;   // { dataUrl, name, size }
-
-function updateShipUI() {
-  const drop = $('#shipDrop');
-  drop.classList.toggle('off', !CFG?.visionReady);
-  $('#shipHint').textContent = CFG?.visionReady
-    ? '仓库发来的发货列表截图，识别后批量回填快递单号'
-    : '需要先在「设置 → 视觉模型」配置模型';
-
-  const box = $('#shipPrev'); box.innerHTML = '';
-  if (!pendingImage) return;
-  const p = el('div', 'shipprev');
-  const img = el('img'); img.src = pendingImage.dataUrl; p.append(img);
-  const info = el('div', 'grow');
-  info.innerHTML = `<b>${esc(pendingImage.name)}</b><div class="muted">${(pendingImage.size / 1024).toFixed(0)} KB</div>`;
-  p.append(info);
-  const up = el('button', 'btn sm primary', '识别这张截图');
-  up.onclick = uploadShipment;
-  const rm = el('button', 'btn sm', '取消');
-  rm.onclick = () => { pendingImage = null; updateShipUI(); };
-  p.append(up, rm); box.append(p);
-}
-
-function acceptImage(file) {
-  if (!file || !/^image\/(png|jpeg|webp)$/.test(file.type)) { toast('只支持 PNG / JPG / WebP'); return; }
+$('#pickImg').onclick = () => {
   if (!CFG?.visionReady) { openSettings('vision'); toast('先配置视觉模型才能识别截图'); return; }
-  if (file.size > 8 * 1024 * 1024) { toast('图片超过 8MB，请压缩后再传'); return; }
-  const fr = new FileReader();
-  fr.onload = () => { pendingImage = { dataUrl: fr.result, name: file.name || '截图.png', size: file.size }; updateShipUI(); };
-  fr.readAsDataURL(file);
-}
+  $('#imgInput').click();
+};
+$('#imgInput').onchange = (e) => { acceptImage(e.target.files[0]); e.target.value = ''; };
 
-$('#shipDrop').onclick = () => { if (CFG?.visionReady) $('#shipFile').click(); else openSettings('vision'); };
-$('#shipFile').onchange = (e) => { acceptImage(e.target.files[0]); e.target.value = ''; };
-['dragover', 'dragleave', 'drop'].forEach((ev) => {
-  $('#shipDrop').addEventListener(ev, (e) => {
-    e.preventDefault();
-    $('#shipDrop').classList.toggle('over', ev === 'dragover');
-    if (ev === 'drop') acceptImage(e.dataTransfer.files[0]);
-  });
-});
-// 直接 Ctrl+V 粘贴截图，不用先存文件
 document.addEventListener('paste', (e) => {
-  if ($('#s2').classList.contains('on') || $('#sb').classList.contains('on')) return;
+  if (drawerOpen() || $('#settings').classList.contains('on')) return;
   const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
   if (!item) return;
   e.preventDefault();
   acceptImage(item.getAsFile());
 });
 
-async function uploadShipment() {
-  if (!pendingImage) return;
+async function acceptImage(file) {
+  if (!file || !/^image\/(png|jpeg|webp)$/.test(file.type)) { toast('只支持 PNG / JPG / WebP'); return; }
+  if (!CFG?.visionReady) { openSettings('vision'); toast('先配置视觉模型才能识别截图'); return; }
+  if (file.size > 8 * 1024 * 1024) { toast('图片超过 8MB，请压缩后再传'); return; }
+  const dataUrl = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(file); });
   try {
-    await api('POST', '/api/jobs', { imageBase64: pendingImage.dataUrl });
-    pendingImage = null; updateShipUI();
-    setTip('截图已加入队列，识别完成后在右侧批量确认。');
-    loadJobs();
+    await api('POST', '/api/jobs', { imageBase64: dataUrl });
+    toast('截图已加入队列，识别完成后在下面批量确认');
+    loadDesk();
   } catch (e) { setTip(e.message, true); if (e.status === 428) openSettings('user'); }
 }
 
-/* ================================================================ 识别队列 */
+/* ================================================================ 需要处理 */
 
-const ST = { queued: '排队中', running: '识别中', done: '待确认', failed: '失败' };
+const ST = { queued: '排队中', running: '识别中', done: '待确认', failed: '识别失败' };
+const TODO_LABEL = {
+  notify_creator: '告知物流', follow_up: '回访催拍', fill_tracking: '等快递单号',
+  complete_info: '补全信息', draft_incomplete: '草稿未完成', job_failed: '识别失败',
+};
 
-async function loadJobs() {
-  let data; try { data = await api('GET', '/api/jobs'); } catch { return; }
-  const jobs = data.jobs;
-  const pend = jobs.filter((j) => j.status === 'queued' || j.status === 'running').length;
-  const ready = jobs.filter((j) => j.status === 'done').length;
-  const dups = jobs.filter((j) => j.summary?.dupInDb || j.summary?.dupInQueue).length;
-  $('#qMeta').textContent = `共 ${jobs.length} 条 · 处理中 ${pend} · 待确认 ${ready}`;
+/**
+ * 识别队列和待办本来就是同一件事：等着你动手的东西。
+ * 以前拆成两个 tab，商务在待办里看到「该催拍了」，想看详情还得切页面重搜一遍。
+ */
+async function loadDesk() {
+  const box = $('#deskBody');
+  let jobs = [], todos = [];
+  try { jobs = (await api('GET', '/api/jobs')).jobs; } catch { /* 未设身份时静默 */ }
+  try { todos = (await api('GET', '/api/todos')).todos; } catch { /* 同上 */ }
 
-  const dup = $('#qDup'); dup.innerHTML = '';
-  if (dups) {
-    const bar = el('div', 'dupbar');
-    bar.append(el('span', null, `<b>${dups} 条与已有记录或队列中其他条目重复</b>，通常直接丢弃即可。`));
-    bar.append(el('div', 'grow'));
-    const c = el('button', 'btn sm danger', '一键丢弃全部重复');
-    c.onclick = async () => {
-      const targets = jobs.filter((j) => j.summary?.dupInDb || j.summary?.dupInQueue);
-      const keep = new Set(); const drop = [];
-      for (const j of [...targets].sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))) {
-        if (j.summary.dupInDb) { drop.push(j); continue; }
-        const k = j.summary.dupInQueue?.key;
-        if (k && !keep.has(k)) { keep.add(k); continue; }
-        drop.push(j);
-      }
-      if (!drop.length) { toast('没有可丢弃的条目'); return; }
-      if (!confirm(`将丢弃 ${drop.length} 条重复识别（队列内互为重复的保留最早提交的那条）。继续？`)) return;
-      for (const j of drop) await api('DELETE', '/api/jobs/' + j.id).catch(() => {});
-      toast(`已丢弃 ${drop.length} 条`); loadJobs();
-    };
-    bar.append(c); dup.append(bar);
+  const pending = jobs.filter((j) => j.status === 'queued' || j.status === 'running').length;
+  const total = jobs.length + todos.length;
+  $('#nDesk').textContent = total || '';
+
+  box.innerHTML = '';
+  if (!total) {
+    box.append(el('div', 'empty', canIntake()
+      ? '没有待处理的事。<br>把微信里的达人资料或视频口令粘到上面就行。'
+      : '没有待处理的事。'));
+    stopPoll(); return;
   }
 
-  const box = $('#qBody'); box.innerHTML = '';
-  if (!jobs.length) { box.append(el('div', 'empty', '还没有粘贴任何内容，先在左侧试试')); stopPoll(); return; }
+  const grp = el('div', 'grp');
+  const h = el('div', 'grp-h');
+  h.append(el('b', null, '需要处理'), el('span', null, `${total} 件`));
+  grp.append(h);
 
-  // 队列只承担四件事：类型、摘要、状态、操作。细节一律留到确认页说
-  jobs.forEach((j) => {
-    const s = j.summary;
-    const busy = j.status === 'queued' || j.status === 'running';
-    const isDup = !!(s?.dupInDb || s?.dupInQueue);
-    const it = el('div', 'qitem' + (isDup ? ' dup' : ''));
+  jobs.forEach((j) => grp.append(jobRow(j)));
+  todos.forEach((t) => grp.append(todoRow(t)));
+  box.append(grp);
 
-    const isShip = j.kind === 'shipment';
-    const r1 = el('div', 'r1');
-    r1.append(el('span', 'badge mock', isShip ? '发货截图' : (isDup && s.dupInDb ? '新合作' : '建档')));
-    r1.append(el('span', 'nm', esc(s?.name || j.title || '—')));
-    // 待确认状态不显示胶囊 —— 右侧「去确认」按钮已经说明了，重复标记只是噪声
-    if (j.status !== 'done') {
-      r1.append(el('span', 'st ' + j.status,
-        (j.status === 'running' ? '<span class="spin"></span> ' : '') + ST[j.status]));
-    }
-
-    const acts = el('div', 'acts');
-    if (j.status === 'done') {
-      const b = el('button', 'btn sm primary', isShip ? '去回填' : '去确认');
-      b.onclick = () => (isShip ? openShipment(j.id) : openJob(j.id));
-      acts.append(b);
-    }
-    if (j.status === 'failed') {
-      const b = el('button', 'btn sm', '重试');
-      b.onclick = async () => { await api('POST', `/api/jobs/${j.id}/retry`); loadJobs(); }; acts.append(b);
-    }
-    if (!busy) {
-      const d = el('button', 'btn sm danger', isDup ? '丢弃' : '移除');
-      d.onclick = async () => { await api('DELETE', '/api/jobs/' + j.id); loadJobs(); }; acts.append(d);
-    }
-    r1.append(acts); it.append(r1);
-
-    // 摘要一行说完
-    const r2 = el('div', 'r2');
-    if (j.status === 'failed') r2.innerHTML = `<span style="color:var(--red)">${esc(j.error || '识别失败')}</span>`;
-    else if (busy) r2.textContent = isShip ? '截图识别中，一张图可能有十几条记录' : '识别在后台进行，可以继续粘贴下一位';
-    else if (isShip && s?.shipment) {
-      const c = s.shipment; const bits = [`${c.total} 条记录`];
-      if (c.high) bits.push(`<span style="color:var(--green)">${c.high} 条可直接回填</span>`);
-      if (c.low) bits.push(`<span style="color:var(--amber)">${c.low} 条需确认</span>`);
-      if (c.none) bits.push(`<span style="color:var(--red)">${c.none} 条没匹配上</span>`);
-      if (c.already) bits.push(`${c.already} 条已回填过`);
-      r2.innerHTML = bits.join(' · ');
-    }
-    else if (s) {
-      const bits = [`${s.accounts} 个账号`];
-      if (s.missing) bits.push(`<span style="color:var(--red)">待补充 ${s.missing} 项</span>`);
-      if (s.dupInDb) bits.push(`<span style="color:var(--red)">已有达人，将作为新合作</span>`);
-      else if (s.dupInQueue) bits.push(`<span style="color:var(--red)">与队列中另一条重复</span>`);
-      else if (s.alerts) bits.push(`<span style="color:var(--amber)">${s.alerts} 条需核对</span>`);
-      r2.innerHTML = bits.join(' · ');
-    }
-    it.append(r2);
-    if (j.status === 'done') { it.style.cursor = 'pointer'; it.onclick = (e) => { if (e.target.tagName !== 'BUTTON') openJob(j.id); }; }
-    box.append(it);
-  });
-  if (pend) startPoll(); else stopPoll();
+  if (pending) startPoll(); else stopPoll();
 }
-function startPoll() { if (!poller) poller = setInterval(loadJobs, 1800); }
+
+function startPoll() { if (!poller) poller = setInterval(loadDesk, 1800); }
 function stopPoll() { if (poller) { clearInterval(poller); poller = null; } }
+
+function jobRow(j) {
+  const s = j.summary;
+  const busy = j.status === 'queued' || j.status === 'running';
+  const isDup = !!(s?.dupInDb || s?.dupInQueue);
+  const isShip = j.kind === 'shipment';
+  const it = el('div', 'item' + (j.status === 'failed' || isDup ? ' bad' : busy || j.status === 'done' ? ' acc' : ''));
+
+  const info = el('div');
+  const t = el('div', 'it-t');
+  t.append(el('b', null, esc(s?.name || j.title || (isShip ? '发货截图' : '—'))));
+  if (busy) t.append(el('span', 'st running', '<span class="spin"></span> 识别中'));
+  else if (j.status === 'done') t.append(el('span', 'st done', '识别完成'));
+  else if (j.status === 'failed') t.append(el('span', 'st failed', '识别失败'));
+  if (s?.missing) t.append(el('span', 'st p2', `${s.missing} 项待补充`));
+  if (s?.dupInDb) t.append(el('span', 'st dupt', '已有达人'));
+  else if (s?.dupInQueue) t.append(el('span', 'st dupt', '与队列中另一条重复'));
+  info.append(t);
+
+  let sub = '';
+  if (j.status === 'failed') sub = j.error || '识别失败';
+  else if (busy) sub = isShip ? '截图识别中，一张图可能有十几条记录' : '识别在后台进行，可以继续粘下一条';
+  else if (isShip && s?.shipment) {
+    const c = s.shipment;
+    sub = [`${c.total} 条邮寄记录`,
+      c.high ? `${c.high} 条高置信自动匹配` : '',
+      c.low ? `${c.low} 条需核对` : '',
+      c.none ? `${c.none} 条没匹配上` : ''].filter(Boolean).join(' · ');
+  } else if (s) {
+    sub = [isDup ? '建档（将作为新合作）' : '建档', `${s.accounts} 个账号`].join(' · ');
+  }
+  info.append(el('div', 'it-s', esc(sub)));
+
+  const acts = el('div', 'acts');
+  if (j.status === 'done') {
+    const b = el('button', 'btn primary sm', isShip ? '逐条核对' : '确认');
+    b.onclick = () => (isShip ? openShipment(j.id) : openJob(j.id));
+    acts.append(b);
+  }
+  if (j.status === 'failed') {
+    const b = el('button', 'btn sm', '重试');
+    b.onclick = async () => { await api('POST', `/api/jobs/${j.id}/retry`); loadDesk(); };
+    acts.append(b);
+  }
+  const d = el('button', 'btn sm danger', busy ? '取消' : '丢弃');
+  d.onclick = async () => { await api('DELETE', '/api/jobs/' + j.id); loadDesk(); };
+  acts.append(d);
+
+  it.append(info, acts);
+  return it;
+}
+
+function todoRow(t) {
+  const it = el('div', 'item' + (t.overdue ? ' bad' : ''));
+  const info = el('div');
+  const tt = el('div', 'it-t');
+  tt.append(el('b', null, esc(t.title)));
+  tt.append(el('span', 'st p' + t.priority, TODO_LABEL[t.type] || t.type));
+  if (t.overdue) tt.append(el('span', 'st dupt', '逾期'));
+  info.append(tt, el('div', 'it-s', esc(t.detail || '')));
+
+  const acts = el('div', 'acts');
+  if (t.type === 'notify_creator') {
+    const cp = el('button', 'btn sm', '复制文案');
+    cp.onclick = async () => {
+      const { notifyText } = await api('GET', '/api/collaborations/' + t.collaborationId);
+      toast(await copy(notifyText) ? '已复制，去微信发给达人' : '复制失败');
+    };
+    const mk = el('button', 'btn primary sm', '标记已告知');
+    mk.onclick = async () => {
+      await api('POST', `/api/collaborations/${t.collaborationId}/notified`, { value: true });
+      toast('已标记'); loadDesk();
+    };
+    acts.append(cp, mk);
+  }
+  if (t.type === 'fill_tracking') {
+    const b = el('button', 'btn primary sm', '回填快递');
+    b.onclick = () => openTrackingModal(t.collaborationId);
+    acts.append(b);
+  }
+  if (t.type === 'follow_up') {
+    const b = el('button', 'btn primary sm', '记录回访');
+    b.onclick = () => openFollowUpModal(t.collaborationId);
+    acts.append(b);
+  }
+  if (t.type === 'complete_info') {
+    const b = el('button', 'btn primary sm', '补全');
+    b.onclick = () => openCollaboration(t.collaborationId);
+    acts.append(b);
+  }
+  if (t.type === 'draft_incomplete') {
+    const b = el('button', 'btn primary sm', '继续录入');
+    b.onclick = async () => {
+      const { draft } = await api('GET', '/api/drafts/' + t.draftId);
+      S = { form: draft.form, fieldMeta: {}, warnings: [], ignored: [], rawText: draft.rawText,
+        extracted: draft.extracted, mode: 'draft', model: '—', elapsedMs: 0, creatorId: null };
+      draftId = draft.id; jobId = null; t0 = Date.now();
+      openIntakeDrawer();
+    };
+    const d = el('button', 'btn sm danger', '删除');
+    d.onclick = async () => { if (!confirm('删除该草稿？')) return; await api('DELETE', '/api/drafts/' + t.draftId); loadDesk(); };
+    acts.append(b, d);
+  }
+  if (t.type === 'job_failed') {
+    const b = el('button', 'btn sm', '重试');
+    b.onclick = async () => { await api('POST', `/api/jobs/${t.jobId}/retry`); loadDesk(); };
+    acts.append(b);
+  }
+  if (t.collaborationId) {
+    const v = el('button', 'btn sm', '详情');
+    v.onclick = () => openCollaboration(t.collaborationId);
+    acts.append(v);
+  }
+  it.append(info, acts);
+  return it;
+}
+
+/* ================================================================ 建档确认 */
 
 async function openJob(id) {
   const { job } = await api('GET', '/api/jobs/' + id);
   if (!job.result) return;
   S = { ...job.result, rawText: job.rawText, creatorId: null };
-  // 命中已有达人时，默认走「发起新合作」
   const dup = (S.conflicts?.hard || [])[0];
-  if (dup) S.creatorId = dup.existing.creatorId;
+  if (dup) S.creatorId = dup.existing.creatorId;   // 命中已有达人时默认走「发起新合作」
   jobId = id; draftId = null; t0 = Date.now();
-  showStage('s2'); renderForm();
-  setTimeout(() => (document.querySelector('.f.miss input') || document.querySelector('.f input'))?.focus(), 60);
-  window.scrollTo({ top: 0 });
+  openIntakeDrawer();
 }
 
-/* ================================================================ 建档确认页 */
+function openIntakeDrawer() {
+  const jump = el('button', 'btn sm', '下一个待补充');
+  jump.append(el('span', 'kbd', 'Alt+N'));
+  jump.id = 'jump';
+  jump.onclick = jumpNext;
 
-/**
- * 识别成功是默认状态，不加任何标记 —— 只标异常。
- * 每个字段都挂一张「已识别」标签，等于把噪声铺满整个表单。
- */
+  const discard = el('button', 'btn danger', '丢弃');
+  discard.onclick = () => discardCurrent(false);
+  const draft = el('button', 'btn', '存草稿');
+  draft.onclick = saveDraft;
+  const rec = el('button', 'btn', '仅建档，暂不寄样');
+  rec.onclick = () => submitCollaboration('createRecord');
+  const smp = el('button', 'btn primary', '确认并提交寄样');
+  smp.id = 'submitSample';
+  smp.onclick = () => submitCollaboration('submitSample');
+  const warn = el('span', 'it-s grow'); warn.id = 'fWarn';
+
+  openDrawer({
+    title: S.creatorId ? '新增一次合作' : '新建合作',
+    tags: [],
+    foot: [discard, warn, draft, rec, smp],
+    onClose: () => { S = null; loadDesk(); },
+  });
+  $('#drHead').insertBefore(jump, $('#drHead').lastChild);
+
+  $('#drLeft').innerHTML = `
+    <div id="alerts"></div>
+    <div class="rh" id="creatorNote"></div>
+    <div class="fgrid" id="gCreator"></div>
+    <div class="rh">抖音账号 <span id="acctNote"></span></div>
+    <div id="gAcct"></div>
+    <div style="margin-bottom:12px"><button class="btn sm" id="addAcct">+ 再加一个账号</button></div>
+    <div class="rh">寄样产品 <span id="itemNote"></span></div>
+    <div id="gItems"></div>
+    <div style="margin:8px 0 12px"><button class="btn sm" id="addItem">+ 再加一个产品</button></div>
+    <div class="fgrid" id="gCost"></div>
+    <div class="rh">收件信息</div>
+    <div id="gRecip"></div>`;
+  $('#drRight').innerHTML = `
+    <div class="rh">原文 · 点字段高亮出处 <span id="srcMeta"></span></div>
+    <div class="src" id="srcPre"></div>
+    <div class="rh">资料分几条消息发来？</div>
+    <textarea id="more" placeholder="继续粘贴新片段…"
+      style="width:100%;min-height:70px;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:12.5px/1.6 inherit"></textarea>
+    <button class="btn sm" id="merge" style="margin-top:8px">合并识别</button>
+    <div class="rh" id="counts" style="margin-top:14px"></div>
+    <div class="rh" id="agentInfo"></div>`;
+
+  $('#addAcct').onclick = () => { S.form.accounts.push({ nickname: '', douyinId: '', uid: '', cooperationCode: '', profileUrl: '' }); renderForm(); };
+  $('#addItem').onclick = () => { S.form.items.push({ productId: null, productName: '', quantity: 1 }); renderItems(); recount(); };
+  $('#merge').onclick = mergeMore;
+
+  renderForm();
+  setTimeout(() => ($('#drLeft .f.miss input') || $('#drLeft .f input'))?.focus(), 60);
+}
+
 function fld(label, path, value, m, opt = {}) {
   const has = !!(value && String(value).trim());
   const low = has && m && m.confidence && m.confidence < 0.85;
-  // 选填字段空着是正常状态，不该标「待补充」，也不该被 Alt+N 跳过去。
-  // 之前配送备注的 placeholder 写着「无则留空」，却又被算进待补充还抢焦点，自相矛盾。
+  // 选填字段空着是正常状态，不标「待补充」，也不被 Alt+N 跳过去。
+  // 配送备注的 placeholder 写着「无则留空」，却又被算进待补充还抢焦点，自相矛盾。
   const w = el('div', 'f' + (has ? (low ? ' chk' : '') : (opt.optional ? '' : ' miss')));
   const lab = el('label'); lab.append(document.createTextNode(label));
   if (!has && !opt.optional) lab.append(el('span', 'tag miss', '待补充'));
   else if (low) lab.append(el('span', 'tag chk', '需核对'));
+  else if (opt.optional && !has) lab.append(el('span', 'tag opt', '选填'));
   if (low) w.dataset.low = '1';
   if (opt.optional) w.dataset.optional = '1';
   const inp = el('input');
@@ -422,6 +637,7 @@ function fld(label, path, value, m, opt = {}) {
   inp.onfocus = () => mark(m?.source); inp.onblur = () => mark(null);
   w.append(lab, inp); return w;
 }
+
 function setPath(path, v) {
   const seg = path.split('.'); let o = S.form;
   for (let i = 0; i < seg.length - 1; i++) o = o[/^\d+$/.test(seg[i]) ? Number(seg[i]) : seg[i]];
@@ -432,23 +648,22 @@ function renderForm() {
   const F = S.form, M = S.fieldMeta || {};
   F.items ||= []; if (F.sampleCost === undefined) F.sampleCost = null;
 
-  // 叙事主体是「一次合作」，不是「一个达人」
-  const isNew = !S.creatorId;
-  $('#confirmTitle').textContent = isNew ? '新建合作' : '新增一次合作';
-  const tag = $('#confirmTag');
-  tag.className = 'badge ' + (isNew ? 'mock' : 'llm');
-  tag.textContent = isNew ? '新达人' : '已有达人';
-  $('#creatorNote').textContent = isNew ? '库里没有这个账号，会同时建达人档案' : '账号已存在，本次只新增一条合作记录';
+  $('#creatorNote').textContent = S.creatorId
+    ? '账号已存在，本次只新增一条合作记录' : '库里没有这个账号，会同时建达人档案';
 
   const gc = $('#gCreator'); gc.innerHTML = '';
-  gc.append(fld('达人名称', 'name', F.name, M.name));
+  gc.append(fld('达人名称', 'name', F.name, M.name, { optional: true }));
 
   const ga = $('#gAcct'); ga.innerHTML = '';
   F.accounts.forEach((a, i) => {
-    const card = el('div', 'acct'), h = el('div', 'acct-h');
-    h.append(el('span', null, '账号 ' + (i + 1)));
-    if (F.accounts.length > 1) { const d = el('button', 'link red', '移除'); d.onclick = () => { F.accounts.splice(i, 1); renderForm(); }; h.append(d); }
-    const g = el('div', 'grid2'), am = (M.accounts && M.accounts[i]) || {};
+    const card = el('div'); card.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:9px';
+    const h = el('div'); h.style.cssText = 'display:flex;align-items:center;margin-bottom:8px;font-size:11.5px;color:var(--ink-300)';
+    h.append(el('span', null, '账号 ' + (i + 1)), el('span', 'grow'));
+    if (F.accounts.length > 1) {
+      const d = el('button', 'btn sm danger', '移除');
+      d.onclick = () => { F.accounts.splice(i, 1); renderForm(); }; h.append(d);
+    }
+    const g = el('div', 'fgrid'), am = (M.accounts && M.accounts[i]) || {};
     g.append(fld('昵称', `accounts.${i}.nickname`, a.nickname, am.nickname),
       fld('抖音号', `accounts.${i}.douyinId`, a.douyinId, am.douyinId),
       fld('UID', `accounts.${i}.uid`, a.uid, am.uid),
@@ -461,12 +676,15 @@ function renderForm() {
 
   const gr = $('#gRecip'); gr.innerHTML = '';
   const rm = M.recipient || {};
-  const r2 = el('div', 'grid2');
+  const r2 = el('div', 'fgrid');
   r2.append(fld('收件人', 'recipient.name', F.recipient.name, rm.name),
     fld('手机号', 'recipient.phone', F.recipient.phone, rm.phone));
-  gr.append(r2, fld('地址', 'recipient.address', F.recipient.address, rm.address),
+  const rest = el('div', 'fgrid'); rest.style.marginTop = '11px';
+  rest.append(fld('地址', 'recipient.address', F.recipient.address, rm.address, { cls: 'wide' }),
     fld('配送备注', 'recipient.deliveryNote', F.recipient.deliveryNote, rm.deliveryNote,
       { ph: '如：放菜鸟驿站 / 送上门（无则留空）', optional: true }));
+  [...rest.children].forEach((c) => c.classList.add('wide'));
+  gr.append(r2, rest);
 
   renderAlerts(); renderSrc(); recount();
   $('#agentInfo').textContent = `${S.mode === 'llm' ? S.model : '本地模拟'} · ${S.elapsedMs || 0}ms`
@@ -477,21 +695,18 @@ function renderItems() {
   const F = S.form;
   const box = $('#gItems'); box.innerHTML = '';
   const usable = PRODUCTS.filter((p) => p.active !== false);
-
   $('#itemNote').textContent = F.items.length > 1 ? `${F.items.length} 个产品` : '';
 
-  if (!usable.length) {
-    box.append(el('div', 'muted', '还没有可选产品，去「设置 → 寄样产品」添加。'));
-  }
+  if (!usable.length) box.append(el('div', 'it-s', '还没有可选产品，去「设置 → 寄样产品」添加。'));
+
   F.items.forEach((it, i) => {
-    const row = el('div', 'itemrow');
-    const sel = el('select');
+    const row = el('div'); row.style.cssText = 'display:flex;gap:8px;margin-bottom:7px';
+    const sel = el('select'); sel.style.flex = '1';
     sel.append(el('option', null, '— 选择产品 —'));
     usable.forEach((p) => {
       const o = el('option', null, esc(p.name) + (p.spec ? `（${esc(p.spec)}）` : ''));
       o.value = p.id; sel.append(o);
     });
-    // 产品已停用但历史选中时，补一个占位项
     if (it.productId && !usable.some((p) => p.id === it.productId)) {
       const o = el('option', null, esc(it.productName || it.productId) + '（已停用）'); o.value = it.productId; sel.append(o);
     }
@@ -502,23 +717,21 @@ function renderItems() {
       recount();
     };
     const qty = el('input'); qty.type = 'number'; qty.min = '1'; qty.value = it.quantity ?? 1;
+    qty.style.width = '78px';
     qty.oninput = () => { it.quantity = Number(qty.value) || 1; recount(); };
-    const del = el('button', 'del', '×');
+    const del = el('button', 'btn sm danger', '×');
     del.onclick = () => { F.items.splice(i, 1); renderItems(); recount(); };
     row.append(sel, qty, del); box.append(row);
   });
 
   const gcost = $('#gCost'); gcost.innerHTML = '';
   const cf = el('div', 'f');
-  cf.innerHTML = '<label>寄样总费用（元）</label>';
-  const ci = el('input'); ci.type = 'number'; ci.step = '0.01'; ci.placeholder = '选填，用于成本统计';
+  cf.innerHTML = '<label>寄样总费用（元）<span class="tag opt">选填</span></label>';
+  const ci = el('input'); ci.type = 'number'; ci.step = '0.01'; ci.placeholder = '用于成本统计';
   ci.value = F.sampleCost ?? '';
   ci.oninput = () => { F.sampleCost = ci.value === '' ? null : Number(ci.value); recount(); };
   cf.append(ci); gcost.append(cf);
 }
-
-$('#addItem').onclick = () => { S.form.items.push({ productId: null, productName: '', quantity: 1 }); renderItems(); recount(); };
-$('#addAcct').onclick = () => { S.form.accounts.push({ nickname: '', douyinId: '', uid: '', cooperationCode: '', profileUrl: '' }); renderForm(); };
 
 function renderAlerts() {
   const box = $('#alerts'); box.innerHTML = '';
@@ -528,8 +741,7 @@ function renderAlerts() {
     a.append(document.createTextNode(w.detail || ''));
 
     if (w.code === 'UID_COOP_SAME_SHAPE') {
-      const acts = el('div', 'acts');
-      acts.innerHTML = `<span>UID</span><code>${esc(w.swap.uid)}</code><span>合作码</span><code>${esc(w.swap.cooperationCode)}</code>`;
+      const acts = el('div', 'acts'); acts.style.marginTop = '8px';
       const sw = el('button', 'btn sm', '两者互换');
       sw.onclick = () => {
         const acc = S.form.accounts[w.accountIndex];
@@ -540,24 +752,20 @@ function renderAlerts() {
       ok.onclick = () => { S.warnings = S.warnings.filter((x) => x !== w); renderForm(); };
       acts.append(sw, ok); a.append(acts);
     }
-    if (w.items?.length) a.append(el('div', null, w.items.map((i) => `<code>${esc(i)}</code>`).join(' ')));
-    if (w.candidates?.length) a.append(el('div', null, w.candidates.map((i) => `<code>${esc(i)}</code>`).join(' ')));
     if (w.conflicts?.length) {
       const c = w.conflicts[0].existing;
       a.append(el('div', null,
         `<div style="margin-top:6px"><code>${esc(c.douyinId || c.uid)}</code> 属于 <b>${esc(c.creatorName || c.nickname)}</b>（归属 ${esc(c.owner)}，已合作 ${c.collaborationCount} 次）</div>`));
-      const acts = el('div', 'acts');
+      const acts = el('div', 'acts'); acts.style.marginTop = '8px';
       const useExisting = el('button', 'btn sm primary', '在该达人上发起新合作');
       useExisting.onclick = () => {
         S.creatorId = c.creatorId;
         S.warnings = S.warnings.filter((x) => x !== w);
         renderForm(); toast('已切换为「发起新合作」，不会新建达人');
       };
-      const view = el('button', 'btn sm', '查看已有记录');
-      view.onclick = () => openCreator(c.creatorId);
       const drop = el('button', 'btn sm danger', '丢弃这条');
       drop.onclick = () => discardCurrent(false);
-      acts.append(useExisting, view, drop); a.append(acts);
+      acts.append(useExisting, drop); a.append(acts);
     }
     box.append(a);
   });
@@ -570,6 +778,7 @@ function renderSrc() {
   });
   $('#srcMeta').textContent = S.ignored?.length ? `已忽略 ${S.ignored.length} 段` : '';
 }
+
 function mark(src) {
   $$('#srcPre div').forEach((d) => {
     d.innerHTML = esc(d.textContent);
@@ -581,34 +790,30 @@ function mark(src) {
 
 function recount() {
   let miss = 0, chk = 0;
-  $$('#s2 .f').forEach((f) => {
+  $$('#drLeft .f').forEach((f) => {
     const i = f.querySelector('input'); if (!i || i.type === 'number') return;
     const lab = f.querySelector('label'); if (!lab) return;
     const old = lab.querySelector('.tag');
     const empty = !i.value.trim();
     const low = f.dataset.low === '1';
-    if (empty && f.dataset.optional === '1') { f.className = 'f'; old?.remove(); return; }
+    if (empty && f.dataset.optional === '1') { f.className = 'f'; if (old && !old.classList.contains('opt')) old.remove(); return; }
     if (empty) {
       f.className = 'f miss'; miss++;
-      if (!old || !old.classList.contains('miss')) {
-        old?.remove(); lab.append(el('span', 'tag miss', '待补充'));
-      }
+      if (!old || !old.classList.contains('miss')) { old?.remove(); lab.append(el('span', 'tag miss', '待补充')); }
     } else if (low) {
       f.className = 'f chk'; chk++;
-      if (!old || !old.classList.contains('chk')) {
-        old?.remove(); lab.append(el('span', 'tag chk', '需核对'));
-      }
+      if (!old || !old.classList.contains('chk')) { old?.remove(); lab.append(el('span', 'tag chk', '需核对')); }
     } else {
       f.className = 'f'; old?.remove();   // 填好了就把标记去掉，保持安静
     }
   });
 
-  // 只显示需要动手的，「已识别 N」对操作没有帮助
   const parts = [];
   if (miss) parts.push(`<span style="color:var(--red)">待补充 ${miss}</span>`);
   if (chk) parts.push(`<span style="color:var(--amber)">需核对 ${chk}</span>`);
-  $('#counts').innerHTML = parts.join(' · ') || '<span style="color:var(--green)">信息完整</span>';
-  $('#jump').style.display = (miss || chk) ? '' : 'none';
+  const counts = $('#counts');
+  if (counts) counts.innerHTML = parts.join(' · ') || '<span style="color:var(--green)">信息完整</span>';
+  const jump = $('#jump'); if (jump) jump.style.display = (miss || chk) ? '' : 'none';
 
   const F = S.form, w = [];
   const r = F.recipient || {};
@@ -617,23 +822,22 @@ function recount() {
   if (!hasItems) w.push('未选寄样产品');
   if (!r.name || !r.phone || !r.address) w.push('收件信息不全');
   if (F.accounts.some((a) => !a.cooperationCode)) w.push('有账号缺合作码（不影响寄样，影响后续开定向）');
-  $('#fWarn').textContent = w.length ? '提示：' + w.join('；') : '信息完整，可以提交寄样';
-  $('#submitSample').disabled = !hasItems || !r.name || !r.phone || !r.address;
+  const fw = $('#fWarn');
+  if (fw) fw.textContent = w.length ? w.join('；') : '信息完整，可以提交寄样';
+  const ss = $('#submitSample');
+  if (ss) ss.disabled = !hasItems || !r.name || !r.phone || !r.address;
 }
 
 function jumpNext() {
-  const list = $$('#s2 .f.miss input, #s2 .f.chk input');
+  const list = $$('#drLeft .f.miss input, #drLeft .f.chk input');
   const i = list.indexOf(document.activeElement);
   (list[i + 1] || list[0])?.focus();
 }
-$('#jump').onclick = jumpNext;
-document.addEventListener('keydown', (e) => { if (e.altKey && e.key.toLowerCase() === 'n') { e.preventDefault(); jumpNext(); } });
-$('#back').onclick = () => { showStage('s1'); loadJobs(); };
-$('#again').onclick = () => { showStage('s1'); draftId = null; jobId = null; $('#raw').focus(); loadJobs(); };
-$('#toTodo').onclick = () => { showStage('s1'); goTab('todos'); };
-$('#vBack').onclick = () => { showStage('s1'); V = null; };
+document.addEventListener('keydown', (e) => {
+  if (e.altKey && e.key.toLowerCase() === 'n' && drawerOpen()) { e.preventDefault(); jumpNext(); }
+});
 
-$('#merge').onclick = async () => {
+async function mergeMore() {
   const add = $('#more').value.trim(); if (!add) return;
   $('#merge').disabled = true; $('#merge').textContent = '合并中…';
   try {
@@ -644,31 +848,32 @@ $('#merge').onclick = async () => {
     $('#more').value = ''; renderForm(); toast('已合并新片段');
   } catch (e) { toast(e.message); }
   finally { $('#merge').disabled = false; $('#merge').textContent = '合并识别'; }
-};
+}
+
+async function saveDraft() {
+  try {
+    const r = await api('POST', '/api/drafts', { id: draftId, rawText: S.rawText, form: S.form, extracted: S.extracted });
+    draftId = r.draft.id;
+    if (jobId) { await api('DELETE', '/api/jobs/' + jobId).catch(() => {}); jobId = null; }
+    toast('草稿已保存'); closeDrawer();
+  } catch (e) { toast(e.message); }
+}
 
 async function discardCurrent(silent) {
   if (!silent && !confirm('丢弃这条识别结果？原文和识别结果都会删除，不影响已入库的数据。')) return;
   if (jobId) { await api('DELETE', '/api/jobs/' + jobId).catch(() => {}); jobId = null; }
   if (draftId) { await api('DELETE', '/api/drafts/' + draftId).catch(() => {}); draftId = null; }
-  S = null; showStage('s1'); loadJobs(); loadTodos(); toast('已丢弃'); $('#raw').focus();
+  closeDrawer(); toast('已丢弃');
 }
-$('#discard').onclick = () => discardCurrent(false);
 
-$('#saveDraft').onclick = async () => {
-  try {
-    const r = await api('POST', '/api/drafts', { id: draftId, rawText: S.rawText, form: S.form, extracted: S.extracted });
-    draftId = r.draft.id;
-    if (jobId) { await api('DELETE', '/api/jobs/' + jobId).catch(() => {}); jobId = null; }
-    toast('草稿已保存'); loadJobs(); loadTodos();
-  } catch (e) { toast(e.message); }
-};
-
-$('#submitRecord').onclick = () => submitCollaboration('createRecord');
-$('#submitSample').onclick = () => submitCollaboration('submitSample');
-
+/**
+ * 提交后不再跳「完成页」。
+ * 队列本来就是异步的，完成页硬生生打断了「提交完立刻粘下一条」的节奏，
+ * 而它唯一提供的价值 —— 一个「成了」的确认感 —— toast 就够。
+ */
 async function submitCollaboration(action) {
-  const btn = action === 'submitSample' ? $('#submitSample') : $('#submitRecord');
-  btn.disabled = true;
+  const btn = action === 'submitSample' ? $('#submitSample') : null;
+  if (btn) btn.disabled = true;
   try {
     const r = await api('POST', '/api/collaborations', {
       action, creatorId: S.creatorId || null, form: S.form,
@@ -676,57 +881,43 @@ async function submitCollaboration(action) {
       model: S.model, mode: S.mode, promptVersion: S.promptVersion,
       elapsedMs: Date.now() - t0, draftId, jobId,
     });
-    const cb = r.collaboration;
-    $('#doneTitle').textContent = action === 'submitSample' ? '已提交寄样' : '已建档';
-    $('#doneSub').innerHTML = `本条耗时 <span class="timer">${((Date.now() - t0) / 1000).toFixed(1)} 秒</span>，`
-      + (action === 'submitSample' ? '等仓库发货后在待办里回填快递单号。' : '尚未提交寄样，可稍后在记录里补。');
-    const box = $('#recap'); box.innerHTML = '';
-    const rows = [['达人', cb.creatorName],
-      ['抖音账号', cb.fulfillments.map((f) => f.account?.douyinId || f.account?.uid || '（空）').join('、') || '—']];
-    if (cb.items.length) rows.push(['寄样产品', cb.items.map((i) => `${i.productName} ×${i.quantity}`).join('、')]);
-    if (cb.sampleCost != null) rows.push(['寄样费用', '¥' + cb.sampleCost]);
-    if (cb.recipient?.name) rows.push(['收件人', `${cb.recipient.name} / ${cb.recipient.phone || '—'}`]);
-    if (cb.recipient?.address) rows.push(['地址', cb.recipient.address]);
-    if (cb.recipient?.deliveryNote) rows.push(['配送备注', cb.recipient.deliveryNote]);
-    if (r.soft?.length) rows.push(['待完善', r.soft.join('、')]);
-    rows.forEach(([k, v]) => box.append(el('div', null, `<span>${esc(k)}</span><b>${esc(v)}</b>`)));
-
-    showStage('s3'); jobId = null; draftId = null;
-    loadJobs(); loadTodos(); loadRecords(); window.scrollTo({ top: 0 });
+    jobId = null; draftId = null;
+    closeDrawer();
+    toast(`${action === 'submitSample' ? '已提交寄样' : '已建档'} · ${r.collaboration.creatorName || '未命名达人'}`);
+    loadRecords();
+    $('#raw').focus();
   } catch (e) {
     if (e.data?.conflicts) {
       const c = e.data.conflicts[0].existing;
       S.warnings = [{ level: 'error', code: 'DUPLICATE_ACCOUNT', title: '该账号已属于已有达人，未入库',
         detail: '请改用「在该达人上发起新合作」，或丢弃这条。', conflicts: e.data.conflicts },
         ...(S.warnings || []).filter((w) => w.code !== 'DUPLICATE_ACCOUNT')];
-      renderAlerts(); window.scrollTo({ top: 0, behavior: 'smooth' });
+      renderAlerts();
+      $('#drLeft').scrollTo({ top: 0, behavior: 'smooth' });
       toast(`「${c.creatorName || c.nickname}」已存在，归属 ${c.owner}`);
     } else toast(e.message);
-  } finally { btn.disabled = false; }
+  } finally { if (btn) btn.disabled = false; }
 }
 
-/* ================================================================ 视频确认页 */
+/* ================================================================ 视频回传 */
 
-const daysAgo = (iso) => {
-  const d = Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
-  return d <= 0 ? '今天' : `${d} 天前`;
-};
+function openVideoDrawer() {
+  const submit = el('button', 'btn primary', '确认回传');
+  submit.id = 'vSubmit';
+  submit.onclick = () => submitVideo(submit);
+  const cancel = el('button', 'btn', '取消');
+  cancel.onclick = closeDrawer;
 
-function renderVideo() {
-  $('#vInfo').textContent = V.parsed.nickname
-    ? `从口令中提取到昵称「${V.parsed.nickname}」` : '口令里没有【昵称】，需要手动选';
-  const box = $('#vAlerts'); box.innerHTML = '';
-  (V.warnings || []).forEach((w) => {
-    const a = el('div', 'alert ' + (w.level === 'error' ? 'error' : 'warn'));
-    a.append(el('b', null, esc(w.title))); a.append(document.createTextNode(w.detail || ''));
-    box.append(a);
+  openDrawer({
+    title: '确认视频回传',
+    tags: V.matches.length ? [] : [{ text: '没自动匹配上', cls: 'p2' }],
+    foot: [cancel, el('span', 'grow'), submit],
+    onClose: () => { V = null; loadDesk(); },
   });
 
-  const b = $('#vBody'); b.innerHTML = '';
-
-  b.append(el('div', 'group-t', '<span>口令原文</span><span>逐字节保存，交接时整段复制</span>'));
-  b.append(el('div', 'tokenbox', esc(V.shareToken)));
-  const row = el('div'); row.style.cssText = 'display:flex;gap:8px;margin:10px 0 20px';
+  $('#drRight').innerHTML = '<div class="rh">口令原文 · 逐字节保存，交接时整段复制</div>';
+  $('#drRight').append(el('div', 'tokenbox', esc(V.shareToken)));
+  const row = el('div'); row.style.cssText = 'display:flex;gap:8px;margin-top:10px;flex-wrap:wrap';
   const cp = el('button', 'btn sm', '复制口令');
   cp.onclick = async () => toast(await copy(V.shareToken) ? '已复制完整口令' : '复制失败');
   row.append(cp);
@@ -735,15 +926,25 @@ function renderVideo() {
     a.href = V.parsed.videoUrl; a.target = '_blank'; a.rel = 'noreferrer';
     a.style.textDecoration = 'none'; row.append(a);
   }
-  b.append(row);
+  $('#drRight').append(row);
+  (V.warnings || []).forEach((w) => {
+    const a = el('div', 'alert ' + (w.level === 'error' ? 'error' : 'warn'));
+    a.style.marginTop = '12px';
+    a.append(el('b', null, esc(w.title))); a.append(document.createTextNode(w.detail || ''));
+    $('#drRight').append(a);
+  });
 
+  renderVideo();
+}
+
+function renderVideo() {
+  const b = $('#drLeft'); b.innerHTML = '';
   const auto = V.matches || [];
   const shown = auto.length ? auto : (V.searchResults || []);
 
-  b.append(el('div', 'group-t', '<span>这条视频对应哪次合作</span><span>'
-    + (auto.length > 1 ? `匹配到 ${auto.length} 条，选一条`
-      : auto.length ? '' : '没自动匹配上，搜一下自己挑')
-    + '</span>'));
+  b.append(el('div', 'rh', V.parsed.nickname
+    ? `口令里的昵称是「${esc(V.parsed.nickname)}」${auto.length > 1 ? ` · 匹配到 ${auto.length} 条，选一条` : ''}`
+    : '这条视频对应哪次合作 —— 搜达人名 / 抖音号 / UID / 合作码'));
 
   // 昵称匹配不上时（裸链接、达人改名）必须给手动入口，
   // 否则「更新视频」这个动作在这里就断了 —— 只提示「请手动选择」却没有可选的东西。
@@ -755,16 +956,11 @@ function renderVideo() {
     b.append(el('div', 'empty', '没搜到。换个词试试：达人名、抖音号、UID、合作码都能搜。'));
   }
 
-  const foot = el('div'); foot.style.cssText = 'display:flex;gap:10px;margin-top:16px';
-  const submit = el('button', 'btn primary', '确认回传');
-  submit.disabled = !V.chosen;
-  submit.onclick = () => submitVideo(submit);
-  const cancel = el('button', 'btn', '取消');
-  cancel.onclick = () => { showStage('s1'); V = null; };
-  foot.append(submit, cancel); b.append(foot);
+  const sub = $('#vSubmit');
+  if (sub) sub.disabled = !V.chosen;
 }
 
-/* 搜索框的 DOM 复用同一个节点。renderVideo 是整块重绘的，
+/* 搜索框复用同一个 DOM 节点。renderVideo 是整块重绘的，
    每次新建输入框会把焦点和已输入的内容打掉，选一条就得重新打字。 */
 function videoSearchBox() {
   if (!V.searchEl) {
@@ -793,7 +989,6 @@ function videoSearchBox() {
 
     wrap.append(input, hint);
     V.searchEl = wrap;
-    // 让商务一进来就能直接打字，不用先找输入框
     queueMicrotask(() => input.focus());
   }
   return V.searchEl;
@@ -814,7 +1009,7 @@ function matchCard(m) {
     m.alreadyHasVideo ? '该账号已回传过，会被覆盖' : m.filmingProgress));
   hd.append(el('span', 'st queued', esc(cb.status)));
   if (cb.accountCount > 1) {
-    hd.append(el('span', 'muted', `本次共 ${cb.accountCount} 个账号，已回传 ${cb.publishedCount}`));
+    hd.append(el('span', 'it-s', `本次共 ${cb.accountCount} 个账号，已回传 ${cb.publishedCount}`));
   }
   body.append(hd);
 
@@ -824,10 +1019,10 @@ function matchCard(m) {
 
   const dl = el('dl');
   const add = (k, v) => { dl.append(el('dt', null, k), el('dd', null, v)); };
-  add('寄样产品', cb.items.length
+  add('寄样', cb.items.length
     ? cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('、')
     : '<span class="dim">未填</span>');
-  add('收件信息', cb.recipient?.name
+  add('收件', cb.recipient?.name
     ? `${esc(cb.recipient.name)} ${esc(cb.recipient.phone || '')}<br><span class="dim">${esc(cb.recipient.address || '')}</span>`
     : '<span class="dim">未填</span>');
   add('快递', cb.packages.length
@@ -845,30 +1040,24 @@ async function submitVideo(submit) {
   submit.disabled = true;
   try {
     const r = await api('POST', '/api/video/submit', { shareToken: V.shareToken, fulfillmentId: V.chosen });
-    $('#doneTitle').textContent = '视频已记录';
-    $('#doneSub').textContent = r.collaboration.status === '已完成'
-      ? '该合作的所有账号都已回传，合作自动标记为已完成。'
-      : '还有账号未回传，会继续出现在待办里。';
-    const box = $('#recap'); box.innerHTML = '';
-    [['达人', r.collaboration.creatorName], ['账号', r.fulfillment.account?.nickname || '—'],
-      ['拍摄进度', r.fulfillment.filmingProgress], ['合作状态', r.collaboration.status]]
-      .forEach(([k, v]) => box.append(el('div', null, `<span>${esc(k)}</span><b>${esc(v)}</b>`)));
-    showStage('s3'); V = null; loadTodos(); loadRecords(); window.scrollTo({ top: 0 });
+    closeDrawer();
+    toast(r.collaboration.status === '已完成'
+      ? `视频已记录 · ${r.collaboration.creatorName} 所有账号都已回传，合作完成`
+      : `视频已记录 · ${r.collaboration.creatorName}，还有账号未回传`);
+    loadRecords();
   } catch (e) { toast(e.message); submit.disabled = false; }
 }
 
 /* ================================================================ 发货截图批量回填 */
 
-let SB = null;   // { jobId, matched[], picks: Map<index, collaborationId|''>, checked: Set<index> }
-
-async function openShipment(jobId) {
-  const { job } = await api('GET', '/api/jobs/' + jobId);
+async function openShipment(id) {
+  const { job } = await api('GET', '/api/jobs/' + id);
   if (!job.result?.matched) return;
-  // 可选合作用于「没匹配上」的手动指定
   const { collaborations } = await api('GET', '/api/collaborations?scope=mine');
   SB = {
-    jobId,
+    jobId: id,
     matched: job.result.matched,
+    image: job.result.imagePreview || null,
     candidates: collaborations.filter((c) => ['待寄样', '已寄样'].includes(c.status)),
     picks: new Map(), checked: new Set(),
   };
@@ -876,51 +1065,83 @@ async function openShipment(jobId) {
     SB.picks.set(i, m.best?.collaborationId || '');
     if (m.level === 'high' && !m.already) SB.checked.add(i);   // 高置信默认勾选
   });
-  showStage('sb'); renderShipment(); window.scrollTo({ top: 0 });
+
+  const all = el('button', 'btn sm', '全选高置信');
+  all.onclick = () => {
+    SB.matched.forEach((m, i) => { if (m.level === 'high' && !m.already && SB.picks.get(i)) SB.checked.add(i); });
+    renderShipment();
+  };
+  const discard = el('button', 'btn danger', '丢弃');
+  discard.onclick = async () => {
+    if (!confirm('丢弃这张截图的识别结果？已回填的不受影响。')) return;
+    await api('DELETE', '/api/jobs/' + SB.jobId).catch(() => {});
+    closeDrawer(); toast('已丢弃');
+  };
+  const confirmBtn = el('button', 'btn primary', '确认回填');
+  confirmBtn.id = 'sbConfirm';
+  confirmBtn.onclick = confirmShipment;
+  const warn = el('span', 'it-s grow'); warn.id = 'sbWarn';
+
+  openDrawer({
+    title: '回填快递单号',
+    tags: [],
+    foot: [discard, warn, confirmBtn],
+    onClose: () => { SB = null; loadDesk(); },
+  });
+  $('#drHead').insertBefore(all, $('#drHead').lastChild);
+
+  $('#drRight').innerHTML = '<div class="rh">截图原件</div>';
+  if (SB.image) { const img = el('img', 'shot'); img.src = SB.image; $('#drRight').append(img); }
+  else $('#drRight').append(el('div', 'src', '（识别完成后截图已从库里清掉，避免数据文件膨胀）'));
+  $('#drRight').append(el('div', 'alert info',
+    '<b>不猜打码内容</b>手机号和门牌在截图里是打码的。两名候选分差过小就标「分不出」交给人判断。'));
+
+  renderShipment();
 }
 
 function renderShipment() {
-  const box = $('#sbBody'); box.innerHTML = '';
+  const box = $('#drLeft'); box.innerHTML = '';
   const c = SB.matched.reduce((a, m) => { a[m.already ? 'already' : m.level]++; return a; },
     { high: 0, low: 0, none: 0, already: 0 });
-  $('#sbTag').textContent = `${SB.matched.length} 条记录`;
-  const parts = [];
-  if (c.high) parts.push(`<span style="color:var(--green)">可直接回填 ${c.high}</span>`);
-  if (c.low) parts.push(`<span style="color:var(--amber)">需确认 ${c.low}</span>`);
-  if (c.none) parts.push(`<span style="color:var(--red)">没匹配上 ${c.none}</span>`);
-  if (c.already) parts.push(`已回填 ${c.already}`);
-  $('#sbCounts').innerHTML = parts.join(' · ');
+
+  const head = $('#drHead');
+  [...head.querySelectorAll('.st')].forEach((n) => n.remove());
+  const after = head.querySelector('b');
+  const addTag = (text, cls) => after.after(el('span', 'st ' + cls, text));
+  if (c.already) addTag(`${c.already} 条已回填`, 'queued');
+  if (c.none) addTag(`${c.none} 条没匹配上`, 'failed');
+  if (c.low) addTag(`${c.low} 条需核对`, 'p2');
+  if (c.high) addTag(`${c.high} 条高置信`, 'done');
 
   SB.matched.forEach((m, i) => {
     const row = m.row;
     const pick = SB.picks.get(i);
     const on = SB.checked.has(i);
-    const it = el('div', 'srow' + (m.already ? ' already' : on ? ' on' : m.level === 'none' ? ' none' : ''));
+    const it = el('div', 'mcard' + (on ? ' on' : m.level === 'none' ? ' warn' : ''));
 
-    const top = el('div', 'top');
-    const ck = el('input', 'ck'); ck.type = 'checkbox';
+    const ck = el('input'); ck.type = 'checkbox';
+    ck.style.cssText = 'width:16px;height:16px;margin-top:2px';
     ck.checked = on; ck.disabled = m.already || !pick;
     ck.onchange = () => { ck.checked ? SB.checked.add(i) : SB.checked.delete(i); renderShipment(); };
-    top.append(ck);
+    it.append(ck);
 
-    const info = el('div', 'info');
-    const l1 = el('div', 'l1');
-    l1.append(el('b', null, esc(row.recipientName || '（无姓名）')));
-    l1.append(el('span', 'muted', esc(row.phoneMasked || '')));
-    if (m.already) l1.append(el('span', 'st done', '已回填过'));
-    else if (m.level === 'high') l1.append(el('span', 'st done', '高置信'));
-    else if (m.level === 'low') l1.append(el('span', 'st p2', m.ambiguous ? '多条相近，请确认' : '低置信'));
-    else l1.append(el('span', 'st failed', '没匹配上'));
-    info.append(l1);
+    const body = el('div');
+    const hd = el('div', 'hd');
+    hd.append(el('b', null, esc(row.recipientName || '（无姓名）')));
+    hd.append(el('span', 'it-s', esc(row.phoneMasked || '')));
+    if (m.already) hd.append(el('span', 'st done', '已回填过'));
+    else if (m.level === 'high') hd.append(el('span', 'st done', '高置信'));
+    else if (m.level === 'low') hd.append(el('span', 'st p2', m.ambiguous ? '两个候选分不出' : '低置信'));
+    else hd.append(el('span', 'st failed', '没匹配上'));
+    body.append(hd);
 
     const goods = row.products.map((p) => `${esc(p.name)} ×${p.quantity}`).join('、') || '无商品';
-    info.append(el('div', 'l2',
-      `${esc(row.address || '无地址')}<br>${goods} · <b>${esc(row.carrier || '')} ${esc(row.trackingNo || '无单号')}</b>`));
+    body.append(el('div', 'sub',
+      `${esc(row.address || '无地址')}<br>${goods} · ${esc(row.carrier || '')} ${esc(row.trackingNo || '无单号')}`));
 
-    // 匹配到哪次合作 —— 可以改
-    const arrow = el('div', 'arrow');
-    arrow.append(el('span', 'muted', '回填到'));
-    const sel = el('select');
+    const arrow = el('div'); arrow.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:6px';
+    arrow.append(el('span', 'dim', '回填到'));
+    const sel = el('select'); sel.style.flex = '1';
     sel.append(el('option', null, '— 不回填 —'));
     const pool = [...SB.candidates];
     (m.matches || []).forEach((x) => { if (!pool.some((p) => p.id === x.collaborationId)) pool.unshift(x.collaboration); });
@@ -933,16 +1154,19 @@ function renderShipment() {
     });
     sel.value = pick || '';
     sel.disabled = m.already;
+    sel.onclick = (e) => e.stopPropagation();
     sel.onchange = () => {
       SB.picks.set(i, sel.value);
       if (!sel.value) SB.checked.delete(i); else SB.checked.add(i);
       renderShipment();
     };
     arrow.append(sel);
-    if (m.best && pick === m.best.collaborationId) arrow.append(el('span', 'why', m.best.why.join('、')));
-    info.append(arrow);
+    body.append(arrow);
+    if (m.best && pick === m.best.collaborationId) {
+      body.append(el('div', 'dim', `<span style="font-size:11.5px">${esc(m.best.why.join('、'))}</span>`));
+    }
 
-    top.append(info); it.append(top); box.append(it);
+    it.append(body); box.append(it);
   });
 
   const n = [...SB.checked].filter((i) => SB.picks.get(i)).length;
@@ -951,18 +1175,7 @@ function renderShipment() {
   $('#sbConfirm').textContent = n ? `确认回填 ${n} 条` : '确认回填';
 }
 
-$('#sbAll').onclick = () => {
-  SB.matched.forEach((m, i) => { if (m.level === 'high' && !m.already && SB.picks.get(i)) SB.checked.add(i); });
-  renderShipment();
-};
-$('#sbClose').onclick = () => { showStage('s1'); SB = null; loadJobs(); };
-$('#sbDiscard').onclick = async () => {
-  if (!confirm('丢弃这张截图的识别结果？已回填的不受影响。')) return;
-  await api('DELETE', '/api/jobs/' + SB.jobId).catch(() => {});
-  showStage('s1'); SB = null; loadJobs(); toast('已丢弃');
-};
-
-$('#sbConfirm').onclick = async () => {
+async function confirmShipment() {
   const items = [...SB.checked]
     .filter((i) => SB.picks.get(i))
     .map((i) => ({
@@ -976,103 +1189,130 @@ $('#sbConfirm').onclick = async () => {
     // 全部处理完才删任务，留一条没弄的下次还能进来
     const allDone = items.length === SB.matched.filter((m) => !m.already).length;
     const r = await api('POST', '/api/shipments/confirm', { items, jobId: allDone ? SB.jobId : null });
-    $('#doneTitle').textContent = `已回填 ${r.done.length} 条快递单号`;
-    $('#doneSub').textContent = r.failed.length
-      ? `${r.failed.length} 条失败，可回队列重试。`
-      : '这些合作已变为「已寄样」，去待办里复制物流信息发给达人。';
-    const box = $('#recap'); box.innerHTML = '';
-    r.done.forEach((d) => box.append(el('div', null,
-      `<span>${esc(d.creatorName)}</span><b>${esc(d.trackingNo)} · ${esc(d.status)}</b>`)));
-    r.failed.forEach((f) => box.append(el('div', null,
-      `<span style="color:var(--red)">${esc(f.trackingNo)}</span><b>${esc(f.error)}</b>`)));
-    showStage('s3'); SB = null;
-    loadJobs(); loadTodos(); loadRecords(); window.scrollTo({ top: 0 });
+    closeDrawer();
+    toast(r.failed.length
+      ? `已回填 ${r.done.length} 条，${r.failed.length} 条失败`
+      : `已回填 ${r.done.length} 条，去「需要处理」里把单号发给达人`);
+    loadRecords();
   } catch (e) { toast(e.message); $('#sbConfirm').disabled = false; }
-};
+}
 
-/* ================================================================ 待办 */
+/* ================================================================ 合作详情 */
 
-const TODO_META = {
-  notify_creator: { label: '告知物流' }, follow_up: { label: '回访催拍' },
-  fill_tracking: { label: '等快递单号' }, complete_info: { label: '补全信息' },
-  draft_incomplete: { label: '草稿未完成' }, job_failed: { label: '识别失败' },
-};
+/**
+ * 时间线不是装饰。每一格都对应一个真实发生过的动作，没有一格是人手选的 ——
+ * 它把「状态由动作驱动」这条规则可视化了，顺便让「为什么这条是已寄样」不用解释。
+ */
+function timeline(cb) {
+  const wrap = el('div', 'tl');
+  const add = (cls, title, sub) => {
+    const i = el('div', 'tl-i' + (cls ? ' ' + cls : ''));
+    i.append(el('b', null, esc(title)), el('span', null, esc(sub)));
+    wrap.append(i);
+  };
+  const shipped = cb.packages[0];
+  const pending = cb.fulfillments.filter((f) => f.expectVideo && f.filmingProgress !== '已发布' && f.filmingProgress !== '本次不出片');
+  const done = cb.status === '已完成';
 
-async function loadTodos() {
-  let todos = [];
-  try { todos = (await api('GET', '/api/todos')).todos; } catch { return; }
-  const badge = $('#nTodo');
-  badge.textContent = todos.length ? todos.length : '';
-  badge.className = todos.some((t) => t.priority === 1) ? 'hot' : '';
+  add('done', '建档', `${fmtDate(cb.createdAt)} · ${esc(cb.ownerName)} · ${cb.fulfillments.length} 个抖音账号`);
+  if (shipped) add('done', '已寄样', `${fmtDate(shipped.shippedAt)} · ${esc(shipped.carrier)} ${esc(shipped.trackingNo)}`);
+  else add(cb.status === '已终止' ? '' : 'now', '等待仓库发货', '仓库回填快递单号后自动变「已寄样」');
+  if (cb.notifiedAt) add('done', '已告知达人', `${fmtDate(cb.notifiedAt)} · 单号已发出`);
+  else if (shipped) add('now', '该告知达人', '复制物流信息发微信，发完标记已告知');
+  if (done) add('done', '已完成', '所有账号都已回传视频');
+  else if (shipped && cb.notifiedAt) add('now', '等待出片', `建档 ${daysAgo(cb.createdAt)} · ${pending.length} 个账号待发布`);
+  else add('', '已完成', '所有账号回传视频后自动标记');
+  return wrap;
+}
 
-  const box = $('#todoBody'); box.innerHTML = '';
-  if (!todos.length) { box.append(el('div', 'empty', '没有待办，都处理完了')); return; }
+async function openCollaboration(id) {
+  const { collaboration: cb, notifyText } = await api('GET', '/api/collaborations/' + id);
 
-  todos.forEach((t) => {
-    const it = el('div', 'qitem' + (t.overdue ? ' hot' : ''));
-    const r1 = el('div', 'r1');
-    r1.append(el('span', 'st p' + t.priority, TODO_META[t.type]?.label || t.type));
-    r1.append(el('span', 'nm', esc(t.title)));
-    if (t.overdue) r1.append(el('span', 'st dupt', '逾期'));
-    const acts = el('div', 'acts');
+  const foot = [];
+  if (cb.status !== '已终止') {
+    const stop = el('button', 'btn danger', '终止合作');
+    stop.onclick = async () => {
+      if (!confirm('终止后不再产生待办，历史记录保留。确定？')) return;
+      await api('POST', `/api/collaborations/${cb.id}/status`, { status: '已终止' });
+      closeDrawer(); toast('已终止'); loadRecords();
+    };
+    foot.push(stop);
+  }
 
-    if (t.type === 'notify_creator') {
-      const cp = el('button', 'btn sm primary', '复制物流信息');
-      cp.onclick = async () => {
-        const { notifyText } = await api('GET', '/api/collaborations/' + t.collaborationId);
-        toast(await copy(notifyText) ? '已复制，去微信发给达人\n\n' + notifyText : '复制失败');
-      };
-      const mk = el('button', 'btn sm', '标记已告知');
-      mk.onclick = async () => {
-        await api('POST', `/api/collaborations/${t.collaborationId}/notified`, { value: true });
-        toast('已标记'); loadTodos();
-      };
-      acts.append(cp, mk);
-    }
-    if (t.type === 'fill_tracking') {
-      const b = el('button', 'btn sm primary', '回填快递');
-      b.onclick = () => openTrackingModal(t.collaborationId);
-      acts.append(b);
-    }
-    if (t.type === 'follow_up') {
-      const b = el('button', 'btn sm primary', '记录回访结果');
-      b.onclick = () => openFollowUpModal(t.collaborationId);
-      acts.append(b);
-    }
-    if (t.type === 'complete_info') {
-      const b = el('button', 'btn sm primary', '补全');
-      b.onclick = () => openCollaboration(t.collaborationId);
-      acts.append(b);
-    }
-    if (t.type === 'draft_incomplete') {
-      const b = el('button', 'btn sm primary', '继续录入');
-      b.onclick = async () => {
-        const { draft } = await api('GET', '/api/drafts/' + t.draftId);
-        S = { form: draft.form, fieldMeta: {}, warnings: [], ignored: [], rawText: draft.rawText,
-          extracted: draft.extracted, mode: 'draft', model: '—', elapsedMs: 0, creatorId: null };
-        draftId = draft.id; jobId = null; t0 = Date.now();
-        goTab('intake'); showStage('s2'); renderForm();
-      };
-      const d = el('button', 'btn sm danger', '删除');
-      d.onclick = async () => { if (!confirm('删除该草稿？')) return; await api('DELETE', '/api/drafts/' + t.draftId); loadTodos(); };
-      acts.append(b, d);
-    }
-    if (t.type === 'job_failed') {
-      const b = el('button', 'btn sm', '重试');
-      b.onclick = async () => { await api('POST', `/api/jobs/${t.jobId}/retry`); loadTodos(); loadJobs(); };
-      const d = el('button', 'btn sm danger', '丢弃');
-      d.onclick = async () => { await api('DELETE', '/api/jobs/' + t.jobId); loadTodos(); loadJobs(); };
-      acts.append(b, d);
-    }
-    if (t.collaborationId) {
-      const v = el('button', 'btn sm', '详情');
-      v.onclick = () => openCollaboration(t.collaborationId);
-      acts.append(v);
-    }
-    r1.append(acts); it.append(r1);
-    it.append(el('div', 'r2', esc(t.detail || '')));
-    box.append(it);
+  openDrawer({
+    title: cb.creatorName || '未命名达人',
+    tags: [{ text: cb.status, cls: cb.status === '已完成' ? 'done' : 'queued' }],
+    foot,
+    onClose: () => { loadDesk(); loadRecords(); },
   });
+
+  const L = $('#drLeft');
+  L.append(el('div', 'rh', '进展'));
+  L.append(timeline(cb));
+
+  const ops = el('div'); ops.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px';
+  const tk = el('button', 'btn sm', '回填快递');
+  tk.onclick = () => openTrackingModal(cb.id);
+  const cp = el('button', 'btn sm', '复制物流信息');
+  cp.onclick = async () => toast(await copy(notifyText) ? '已复制' : '复制失败');
+  const nt = el('button', 'btn sm', cb.notifiedAt ? '取消已告知' : '标记已告知');
+  nt.onclick = async () => {
+    await api('POST', `/api/collaborations/${cb.id}/notified`, { value: !cb.notifiedAt });
+    closeDrawer(); toast('已更新'); loadDesk(); loadRecords();
+  };
+  const fu = el('button', 'btn sm', '记录回访');
+  fu.onclick = () => openFollowUpModal(cb.id);
+  const cr = el('button', 'btn sm', '查看达人');
+  cr.onclick = () => openCreator(cb.creatorId);
+  ops.append(tk, cp, nt, fu, cr);
+  L.append(ops);
+
+  L.append(el('div', 'rh', `履约项 · 每个账号一条，共 ${cb.fulfillments.length} 个`));
+  cb.fulfillments.forEach((f) => {
+    const m = el('div', 'mcard'); m.style.gridTemplateColumns = '1fr'; m.style.cursor = 'default';
+    const body = el('div');
+    const hd = el('div', 'hd');
+    hd.append(el('b', null, esc(f.account?.nickname || '（无昵称）')));
+    hd.append(el('span', 'st ' + (f.shareToken ? 'done' : 'queued'), esc(f.filmingProgress)));
+    body.append(hd);
+    body.append(el('div', 'sub',
+      `抖音号 ${esc(f.account?.douyinId || '—')} · UID ${esc(f.account?.uid || '—')} · 合作码 ${esc(f.account?.cooperationCode || '—')}`));
+    if (f.shareToken) {
+      const row = el('div'); row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
+      const c2 = el('button', 'btn sm', '复制口令');
+      c2.onclick = async () => toast(await copy(f.shareToken) ? '已复制完整口令，可直接发给运营或粘进千川' : '复制失败');
+      row.append(c2);
+      if (f.videoUrl) {
+        const a = el('a', 'btn sm', '打开视频 ↗');
+        a.href = f.videoUrl; a.target = '_blank'; a.rel = 'noreferrer'; a.style.textDecoration = 'none';
+        row.append(a);
+      }
+      body.append(row);
+    }
+    m.append(body); L.append(m);
+  });
+
+  const R = $('#drRight');
+  R.innerHTML = '<div class="rh">这次合作</div>';
+  const g = el('div', 'fgrid'); g.style.gridTemplateColumns = '1fr';
+  const box = (k, v) => {
+    const f = el('div', 'f');
+    f.innerHTML = `<label>${esc(k)}</label><div class="src" style="font-family:inherit;font-size:12.8px">${v}</div>`;
+    g.append(f);
+  };
+  box('寄样产品', cb.items.length
+    ? cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('、')
+    : '<span class="dim">还没填产品，仓库无法备货</span>');
+  box('寄样费用', cb.sampleCost != null ? '¥' + cb.sampleCost : '<span class="dim">未填</span>');
+  box('收件', `${esc(cb.recipient?.name || '—')} ${esc(cb.recipient?.phone || '')}
+    <div class="dim">${esc(cb.recipient?.address || '')}</div>
+    ${cb.recipient?.deliveryNote ? `<div class="dim">配送备注：${esc(cb.recipient.deliveryNote)}</div>` : ''}`);
+  box('快递', cb.packages.length
+    ? cb.packages.map((p) => `${esc(p.carrier)} ${esc(p.trackingNo)}`).join('<br>')
+    : '<span class="dim">尚未回填</span>');
+  box('归属', esc(cb.ownerName));
+  box('建档', fmtTime(cb.createdAt));
+  R.append(g);
 }
 
 /* ---------- 回填快递 ---------- */
@@ -1090,7 +1330,7 @@ function openTrackingModal(collaborationId) {
     <div class="acts"><button class="btn" id="tkCancel">关闭</button><button class="btn primary" id="tkSave">保存</button></div>
   </div>`;
   document.body.append(m);
-  const close = () => m.remove();
+  const close = () => { m.remove(); loadDesk(); loadRecords(); };
   m.onclick = (e) => { if (e.target === m) close(); };
   m.querySelector('#tkCancel').onclick = close;
 
@@ -1098,14 +1338,14 @@ function openTrackingModal(collaborationId) {
     const { collaboration } = await api('GET', '/api/collaborations/' + collaborationId);
     const list = m.querySelector('#tkList'); list.innerHTML = '';
     if (collaboration.packages.length) {
-      list.append(el('div', 'muted', '已有包裹：'));
+      list.append(el('div', 'dim', '已有包裹：'));
       collaboration.packages.forEach((p) => {
-        const row = el('div', 'mini');
+        const row = el('div');
         row.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:6px';
         row.append(el('span', 'mono', `${esc(p.carrier)} ${esc(p.trackingNo)}`));
-        const d = el('button', 'link red', '删除');
+        const d = el('button', 'btn sm danger', '删除');
         d.style.marginLeft = 'auto';
-        d.onclick = async () => { await api('DELETE', '/api/packages/' + p.id); refresh(); loadTodos(); };
+        d.onclick = async () => { await api('DELETE', '/api/packages/' + p.id); refresh(); };
         row.append(d); list.append(row);
       });
     }
@@ -1120,7 +1360,7 @@ function openTrackingModal(collaborationId) {
       const r = await api('POST', `/api/collaborations/${collaborationId}/packages`, { carrier, trackingNo });
       m.querySelector('#tkNo').value = '';
       toast('已回填，状态变为「' + r.collaboration.status + '」');
-      refresh(); loadTodos(); loadRecords();
+      refresh();
     } catch (e) { toast(e.message); }
   };
 }
@@ -1137,7 +1377,7 @@ async function openFollowUpModal(collaborationId) {
     <div class="acts"><button class="btn" id="fuClose">完成</button></div>
   </div>`;
   document.body.append(m);
-  const close = () => { m.remove(); loadTodos(); loadRecords(); };
+  const close = () => { m.remove(); loadDesk(); loadRecords(); };
   m.onclick = (e) => { if (e.target === m) close(); };
   m.querySelector('#fuClose').onclick = close;
 
@@ -1158,172 +1398,32 @@ async function openFollowUpModal(collaborationId) {
   });
 }
 
-/* ================================================================ 记录查询 */
-
-let scope = 'mine';
-$$('#scopeSeg button').forEach((b) => {
-  b.onclick = () => {
-    $$('#scopeSeg button').forEach((x) => x.classList.remove('on'));
-    b.classList.add('on'); scope = b.dataset.scope; loadRecords();
-  };
-});
-$('#doSearch').onclick = loadRecords;
-$('#q').onkeydown = (e) => { if (e.key === 'Enter') loadRecords(); };
-
-async function loadRecords() {
-  const q = encodeURIComponent($('#q').value.trim());
-  let data; try { data = await api('GET', `/api/collaborations?q=${q}&scope=${scope}`); } catch { return; }
-  const list = data.collaborations;
-  $('#nRec').textContent = data.stats.collaborations || '';
-
-  const box = $('#recBody'); box.innerHTML = '';
-  if (!list.length) { box.append(el('div', 'empty', q ? '没有匹配的记录' : '还没有合作记录，去「录入」创建第一条')); return; }
-
-  const t = el('table');
-  t.innerHTML = `<thead><tr><th>达人</th><th>抖音账号</th><th>寄样产品</th><th>快递</th>
-    <th>拍摄 / 视频</th><th>状态</th><th>归属</th><th>建档</th></tr></thead>`;
-  const tb = el('tbody');
-  list.forEach((cb) => {
-    const tr = el('tr');
-    const accs = cb.fulfillments.map((f) => esc(f.account?.nickname || f.account?.douyinId || '—')).join('<br>') || '—';
-    const items = cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('<br>') || '<span class="muted">未填</span>';
-    const pkgs = cb.packages.map((p) => `${esc(p.carrier)} ${esc(p.trackingNo)}`).join('<br>') || '<span class="muted">未回填</span>';
-    const vids = cb.fulfillments.map((f) => f.shareToken
-      ? '<span style="color:var(--green)">已发布</span>'
-      : `<span class="muted">${esc(f.filmingProgress)}</span>`).join('<br>');
-    tr.innerHTML = `<td><b>${esc(cb.creatorName)}</b></td>
-      <td class="mono">${accs}</td><td>${items}</td><td class="mono">${pkgs}</td><td>${vids}</td>
-      <td>${esc(cb.status)}${cb.notifiedAt ? '<div class="muted">已告知</div>' : ''}</td>
-      <td>${esc(cb.ownerName)}</td><td class="muted">${fmtDate(cb.createdAt)}</td>`;
-    tr.onclick = () => openCollaboration(cb.id);
-    tb.append(tr);
-  });
-  t.append(tb); box.append(t);
-}
-
-/* ---------- 合作详情 ---------- */
-
-async function openCollaboration(id) {
-  const { collaboration: cb, notifyText } = await api('GET', '/api/collaborations/' + id);
-  const mask = el('div', 'mask'), dr = el('div', 'drawer');
-  const close = () => { mask.remove(); dr.remove(); };
-  mask.onclick = close;
-
-  const h = el('header');
-  h.innerHTML = `<h2>${esc(cb.creatorName)} · 合作详情</h2>`;
-  const x = el('button', 'icon', '×'); x.onclick = close; h.append(x);
-
-  const b = el('div', 'body');
-  b.innerHTML = `
-    <dl class="dl">
-      <dt>状态</dt><dd><b>${esc(cb.status)}</b>${cb.notifiedAt ? ' · 已告知达人' : ''}</dd>
-      <dt>归属</dt><dd>${esc(cb.ownerName)}</dd>
-      <dt>寄样费用</dt><dd>${cb.sampleCost != null ? '¥' + cb.sampleCost : '<span class="muted">未填</span>'}</dd>
-      <dt>建档时间</dt><dd>${fmtTime(cb.createdAt)}</dd>
-    </dl>
-    <div class="sec"><h3>寄样产品</h3>${cb.items.length
-      ? cb.items.map((i) => `<div class="mini">${esc(i.productName)} × ${i.quantity}</div>`).join('')
-      : '<div class="mini muted">还没填产品，仓库无法备货</div>'}</div>
-    <div class="sec"><h3>收件信息</h3><div class="mini">${esc(cb.recipient?.name || '—')} ${esc(cb.recipient?.phone || '')}
-      <div class="muted">${esc(cb.recipient?.address || '—')}</div>
-      ${cb.recipient?.deliveryNote ? `<div class="muted">配送备注：${esc(cb.recipient.deliveryNote)}</div>` : ''}</div></div>
-    <div class="sec"><h3>快递包裹</h3>${cb.packages.length
-      ? cb.packages.map((p) => `<div class="mini mono">${esc(p.carrier)} ${esc(p.trackingNo)} · ${fmtDate(p.shippedAt)}</div>`).join('')
-      : '<div class="mini muted">尚未回填</div>'}</div>`;
-
-  // 履约项
-  const fs = el('div', 'sec');
-  fs.append(el('h3', null, `履约项（每个账号一条，共 ${cb.fulfillments.length} 个）`));
-  cb.fulfillments.forEach((f) => {
-    const m = el('div', 'mini');
-    m.innerHTML = `<b>${esc(f.account?.nickname || '（无昵称）')}</b>
-      <div class="muted mono">抖音号 ${esc(f.account?.douyinId || '—')} · UID ${esc(f.account?.uid || '—')} · 合作码 ${esc(f.account?.cooperationCode || '—')}</div>
-      <div style="margin-top:6px">拍摄进度：<b>${esc(f.filmingProgress)}</b>${f.publishedAt ? ' · ' + fmtDate(f.publishedAt) : ''}</div>`;
-    if (f.shareToken) {
-      const row = el('div'); row.style.cssText = 'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap';
-      const cp = el('button', 'btn sm', '复制口令');
-      cp.onclick = async () => toast(await copy(f.shareToken) ? '已复制完整口令，可直接发给运营或粘进千川' : '复制失败');
-      row.append(cp);
-      if (f.videoUrl) { const a = el('a', 'btn sm', '打开视频 ↗'); a.href = f.videoUrl; a.target = '_blank'; a.rel = 'noreferrer'; a.style.textDecoration = 'none'; row.append(a); }
-      m.append(row);
-    }
-    fs.append(m);
-  });
-  b.append(fs);
-
-  // 操作
-  const ops = el('div', 'sec');
-  ops.append(el('h3', null, '操作'));
-  const row = el('div'); row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
-  const tk = el('button', 'btn sm', '回填快递');
-  tk.onclick = () => { close(); openTrackingModal(cb.id); };
-  const cp = el('button', 'btn sm', '复制物流信息');
-  cp.onclick = async () => toast(await copy(notifyText) ? '已复制\n\n' + notifyText : '复制失败');
-  const nt = el('button', 'btn sm', cb.notifiedAt ? '取消已告知' : '标记已告知');
-  nt.onclick = async () => { await api('POST', `/api/collaborations/${cb.id}/notified`, { value: !cb.notifiedAt }); close(); loadTodos(); loadRecords(); };
-  const fu = el('button', 'btn sm', '记录回访');
-  fu.onclick = () => { close(); openFollowUpModal(cb.id); };
-  const cr = el('button', 'btn sm', '查看达人');
-  cr.onclick = () => { close(); openCreator(cb.creatorId); };
-  row.append(tk, cp, nt, fu, cr);
-  if (cb.status !== '已终止') {
-    const stop = el('button', 'btn sm danger', '终止合作');
-    stop.onclick = async () => {
-      if (!confirm('终止后不再产生待办，历史记录保留。确定？')) return;
-      await api('POST', `/api/collaborations/${cb.id}/status`, { status: '已终止' });
-      close(); loadTodos(); loadRecords(); toast('已终止');
-    };
-    row.append(stop);
-  }
-  ops.append(row); b.append(ops);
-
-  dr.append(h, b); document.body.append(mask, dr);
-}
-
 /* ---------- 达人详情 ---------- */
 
 async function openCreator(id) {
   const { creator: c, logs } = await api('GET', '/api/creators/' + id);
-  const mask = el('div', 'mask'), dr = el('div', 'drawer');
-  const close = () => { mask.remove(); dr.remove(); };
-  mask.onclick = close;
+  openDrawer({
+    title: c.name || '达人详情',
+    tags: [{ text: '归属 ' + c.ownerName, cls: 'queued' }],
+    foot: [],
+    onClose: () => loadRecords(),
+  });
 
-  const h = el('header');
-  h.innerHTML = `<h2>${esc(c.name || '达人详情')}</h2>`;
-  const x = el('button', 'icon', '×'); x.onclick = close; h.append(x);
+  const L = $('#drLeft');
+  L.innerHTML = `<div class="rh">抖音账号（${c.accounts.length}）</div>
+    ${c.accounts.map((a) => `<div class="mcard" style="grid-template-columns:1fr;cursor:default">
+      <div><div class="hd"><b>${esc(a.nickname || '（无昵称）')}</b></div>
+      <div class="sub">抖音号 ${esc(a.douyinId || '—')} · UID ${esc(a.uid || '—')} · 合作码 ${esc(a.cooperationCode || '—')}</div></div>
+    </div>`).join('') || '<div class="dim">无</div>'}
+    ${c.otherAccounts.length ? `<div class="rh">其他平台账号（仅存档，不参与业务）</div>
+      ${c.otherAccounts.map((o) => `<div class="src">${esc(o.platform)} · ${esc(o.accountId)}</div>`).join('')}` : ''}
+    <div class="rh">合作历史（${c.collaborations.length}）</div>
+    ${c.collaborations.map((cb) => `<div class="src" style="font-family:inherit;margin-bottom:6px">
+      <b>${esc(cb.status)}</b> · ${cb.items.map((i) => esc(i.productName) + ' ×' + i.quantity).join('、') || '未填产品'}
+      · ${fmtDate(cb.createdAt)}</div>`).join('') || '<div class="dim">无</div>'}`;
 
-  const b = el('div', 'body');
-  b.innerHTML = `
-    <dl class="dl">
-      <dt>归属</dt><dd>${esc(c.ownerName)}</dd>
-      <dt>渠道来源</dt><dd>${esc(c.channel || '抖音达人广场')}</dd>
-      <dt>建档时间</dt><dd>${fmtTime(c.createdAt)}</dd>
-      <dt>默认收件</dt><dd>${esc(c.defaultRecipient?.name || '—')} ${esc(c.defaultRecipient?.phone || '')}
-        <div class="muted">${esc(c.defaultRecipient?.address || '')}</div></dd>
-    </dl>
-    <div class="sec"><h3>抖音账号（${c.accounts.length}）</h3>
-      ${c.accounts.map((a) => `<div class="mini"><b>${esc(a.nickname || '（无昵称）')}</b>
-        <div class="muted mono">抖音号 ${esc(a.douyinId || '—')} · UID ${esc(a.uid || '—')} · 合作码 ${esc(a.cooperationCode || '—')}</div></div>`).join('') || '<div class="muted">无</div>'}
-    </div>
-    ${c.otherAccounts.length ? `<div class="sec"><h3>其他平台账号（仅存档，不参与业务）</h3>
-      ${c.otherAccounts.map((o) => `<div class="mini mono">${esc(o.platform)} · ${esc(o.accountId)}</div>`).join('')}</div>` : ''}
-    <div class="sec"><h3>合作历史（${c.collaborations.length}）</h3>
-      ${c.collaborations.map((cb) => `<div class="mini"><b>${esc(cb.status)}</b>
-        <div class="muted">${cb.items.map((i) => esc(i.productName) + ' ×' + i.quantity).join('、') || '未填产品'} · ${fmtDate(cb.createdAt)}</div></div>`).join('') || '<div class="muted">无</div>'}
-    </div>
-    <div class="sec"><h3>识别留痕</h3>
-      ${(logs || []).map((l) => `<div class="mini">
-        <div>确认人 <b>${esc(l.confirmedByName || '—')}</b> · ${fmtTime(l.confirmedAt)}${l.elapsedMs ? ` · 耗时 ${(l.elapsedMs / 1000).toFixed(1)}s` : ''}</div>
-        <div class="muted mono">${l.mode === 'llm' ? esc(l.model) : '本地模拟'} · ${esc(l.promptVersion)}</div>
-        ${l.diff?.length ? `<div class="muted" style="margin-top:6px">人工修改 ${l.diff.length} 处：${
-          l.diff.map((d) => `${esc(d.field)}「${esc(d.before || '空')}」→「${esc(d.after || '空')}」`).join('；')}</div>`
-          : '<div class="muted" style="margin-top:6px">未修改任何字段</div>'}
-      </div>`).join('') || '<div class="muted">无</div>'}
-    </div>`;
-
-  // 归属转交
-  const tr = el('div', 'sec');
-  tr.append(el('h3', null, '归属转交'));
+  const tr = el('div'); tr.style.marginTop = '14px';
+  tr.append(el('div', 'rh', '归属转交 · 归属人是责任人，待办发给他。人员变动时在这里转交，会留痕。'));
   const trRow = el('div'); trRow.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
   const sel = el('select'); sel.style.cssText = 'padding:7px 10px;border:1px solid var(--line);border-radius:7px';
   (CFG.users || []).forEach((u) => { const o = el('option', null, `${esc(u.name)}`); o.value = u.id; sel.append(o); });
@@ -1332,14 +1432,89 @@ async function openCreator(id) {
   btn.onclick = async () => {
     if (sel.value === c.ownerUserId) { toast('归属没有变化'); return; }
     const reason = prompt('转交原因（会留痕）', '人员调整') || '';
-    await api('POST', `/api/creators/${c.id}/transfer`, { toUserId: sel.value, reason });
-    close(); loadRecords(); loadTodos(); toast('已转交');
+    try {
+      await api('POST', `/api/creators/${c.id}/transfer`, { toUserId: sel.value, reason });
+      closeDrawer(); toast('已转交');
+    } catch (e) { toast(e.message); }
   };
-  trRow.append(sel, btn);
-  trRow.append(el('span', 'muted', '归属人是责任人，待办发给他。人员变动时在这里转交，会留痕。'));
-  tr.append(trRow); b.append(tr);
+  trRow.append(sel, btn); tr.append(trRow); L.append(tr);
 
-  dr.append(h, b); document.body.append(mask, dr);
+  const R = $('#drRight');
+  R.innerHTML = `<div class="rh">识别留痕</div>
+    ${(logs || []).map((l) => `<div class="src" style="font-family:inherit;margin-bottom:8px">
+      确认人 <b>${esc(l.confirmedByName || '—')}</b> · ${fmtTime(l.confirmedAt)}${l.elapsedMs ? ` · 耗时 ${(l.elapsedMs / 1000).toFixed(1)}s` : ''}
+      <div class="dim mono">${l.mode === 'llm' ? esc(l.model) : '本地模拟'} · ${esc(l.promptVersion)}</div>
+      ${l.diff?.length ? `<div class="dim" style="margin-top:6px">人工修改 ${l.diff.length} 处：${
+        l.diff.map((d) => `${esc(d.field)}「${esc(d.before || '空')}」→「${esc(d.after || '空')}」`).join('；')}</div>`
+        : '<div class="dim" style="margin-top:6px">未修改任何字段</div>'}
+    </div>`).join('') || '<div class="dim">无</div>'}
+    <div class="rh">默认收件</div>
+    <div class="src" style="font-family:inherit">${esc(c.defaultRecipient?.name || '—')} ${esc(c.defaultRecipient?.phone || '')}
+      <div class="dim">${esc(c.defaultRecipient?.address || '')}</div></div>`;
+}
+
+/* ================================================================ 合作记录 */
+
+let scope = 'mine', statusFilter = '';
+
+$$('#scopeSeg button').forEach((b) => {
+  b.onclick = () => {
+    $$('#scopeSeg button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on'); scope = b.dataset.scope; loadRecords();
+  };
+});
+$$('#statusSeg button').forEach((b) => {
+  b.onclick = () => {
+    $$('#statusSeg button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on'); statusFilter = b.dataset.status; loadRecords();
+  };
+});
+let qTimer = null;
+$('#q').oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(loadRecords, 260); };
+
+async function loadRecords() {
+  const q = encodeURIComponent($('#q').value.trim());
+  let data, todos = [];
+  try { data = await api('GET', `/api/collaborations?q=${q}&scope=${scope}`); } catch { return; }
+  // 「需要处理」不是一个状态，是一个筛选 —— 这就是待办不该做成独立页面的原因
+  if (statusFilter === '__todo') {
+    try { todos = (await api('GET', '/api/todos')).todos; } catch { /* ignore */ }
+  }
+  const need = new Set(todos.map((t) => t.collaborationId).filter(Boolean));
+
+  let list = data.collaborations;
+  if (statusFilter === '__todo') list = list.filter((cb) => need.has(cb.id));
+  else if (statusFilter) list = list.filter((cb) => cb.status === statusFilter);
+
+  const box = $('#recBody'); box.innerHTML = '';
+  if (!list.length) {
+    box.append(el('div', 'empty', q ? '没有匹配的记录'
+      : statusFilter ? '这个筛选下没有记录' : '还没有合作记录'));
+    return;
+  }
+
+  const t = el('table');
+  t.innerHTML = `<thead><tr><th style="width:22%">达人 / 账号</th><th style="width:14%">状态</th>
+    <th style="width:18%">寄样</th><th style="width:24%">快递</th><th style="width:22%">进展</th></tr></thead>`;
+  const tb = el('tbody');
+  list.forEach((cb) => {
+    const tr = el('tr');
+    const accs = cb.fulfillments.map((f) => esc(f.account?.douyinId || f.account?.nickname || '—')).join('<br>') || '—';
+    const items = cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('<br>') || '<span class="dim">未填</span>';
+    const pkgs = cb.packages.map((p) => `${esc(p.carrier)} ${esc(p.trackingNo)}`).join('<br>') || '<span class="dim">未回填</span>';
+    const published = cb.fulfillments.filter((f) => f.shareToken).length;
+    const prog = [`建档 ${daysAgo(cb.createdAt)}`,
+      cb.notifiedAt ? '已告知' : '',
+      published ? `已出片 ${published}/${cb.fulfillments.length}` : ''].filter(Boolean).join(' · ');
+    tr.innerHTML = `<td><b>${esc(cb.creatorName || '未命名达人')}</b>
+        <div class="mono dim">${accs}</div></td>
+      <td><span class="st ${cb.status === '已完成' ? 'done' : 'queued'}">${esc(cb.status)}</span></td>
+      <td>${items}</td><td class="mono">${pkgs}</td>
+      <td class="dim">${esc(prog)}</td>`;
+    tr.onclick = () => openCollaboration(cb.id);
+    tb.append(tr);
+  });
+  t.append(tb); box.append(t);
 }
 
 /* ================================================================ 设置 */
@@ -1352,10 +1527,7 @@ function switchPanel(name) {
   $$('.spanel').forEach((p) => p.classList.toggle('on', p.id === 'sp-' + name));
 }
 $('#openSettings').onclick = () => openSettings();
-$('#closeSettings').onclick = () => {
-  if (CFG.needsSetup) { toast('请先填写姓名和角色'); return; }
-  $('#settings').classList.remove('on');
-};
+$('#closeSettings').onclick = () => { $('#settings').classList.remove('on'); };
 $$('.settings nav button').forEach((b) => { b.onclick = () => switchPanel(b.dataset.panel); });
 
 function setRole(r) { curRole = r; $$('#roleChips button').forEach((b) => b.classList.toggle('on', b.dataset.role === r)); }
@@ -1407,11 +1579,8 @@ $('#saveUser').onclick = async () => {
   if (!name) { msg('#userMsg', '请填写姓名', false); return; }
   try {
     const r = await api('PUT', '/api/settings', { user: { name, role: curRole, phone: $('#uPhone').value.trim() } });
-    // 只在这里把身份钉进本浏览器。别在 refreshConfig 里做 ——
-    // 那样一个新开的浏览器会自动latch住全局默认用户，等于又回到共享身份。
-    if (r.settings?.user?.id) setMyUserId(r.settings.user.id);
     await refreshConfig(); loadJobs(); loadTodos(); loadRecords();
-    msg('#userMsg', '已保存，这台浏览器之后都以「' + name + '」的身份操作');
+    msg('#userMsg', '已保存');
   } catch (e) { msg('#userMsg', e.message, false); }
 };
 

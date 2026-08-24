@@ -15,6 +15,10 @@ import { join, dirname, extname, normalize as normPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import * as db from './lib/db.js';
+import {
+  COOKIE_NAME, parseCookies, readSession, issueSession, sessionCookie, clearCookie,
+  hashPassphrase, verifyPassphrase,
+} from './lib/auth.js';
 import { extract, extractShipment, agentReady, agentConfig, visionReady, testConnection, PROMPT_VERSION } from './lib/agent.js';
 import {
   normalize, sanitizeForStore, validateForAction, validateVideoSubmit,
@@ -42,6 +46,14 @@ const PUBLIC = join(ROOT, 'public');
 
 const PORT = Number(process.env.PORT || 5173);
 const HOST = process.env.HOST || '127.0.0.1';
+
+/** 无需会话即可访问的接口。除此之外全部拦住。 */
+const OPEN_ROUTES = new Set([
+  '/api/auth/state',
+  '/api/auth/bootstrap',
+  '/api/auth/login',
+  '/api/auth/logout',
+]);
 
 /* -------------------------------------------------------------- 工具 */
 
@@ -82,12 +94,23 @@ function httpError(status, message, extra = {}) {
   return e;
 }
 
-/** 身份唯一入口 */
-const userOf = async (req) => db.currentUser(req.headers['x-user-id']);
+/**
+ * 身份唯一入口。
+ *
+ * 改造前这里读的是前端自报的 X-User-Id —— 局域网上线后那等于没有鉴权，
+ * 改个请求头就能变成任何人，按归属拦截的 403 全部形同虚设。
+ * 现在读服务端签发的会话 cookie，签名密钥只在服务器上。
+ */
+const userOf = async (req) => {
+  const token = parseCookies(req.headers.cookie)[COOKIE_NAME];
+  const uid = readSession(token);
+  return uid ? db.currentUser(uid) : null;
+};
 
 async function requireUser(req) {
   const u = await userOf(req);
-  if (!u) throw httpError(428, '请先在「设置 → 用户设置」里填写你的姓名和角色');
+  // 正常情况下全局守卫已经先返回 401 了，这里是兜底
+  if (!u) throw httpError(401, '登录已过期，请重新登录');
   return u;
 }
 
@@ -232,7 +255,7 @@ async function runShipment(job) {
 
 /* -------------------------------------------------------------- 后台任务 */
 
-const maxConcurrent = () => Math.max(1, Math.min(10, agentConfig().concurrency || 3));
+const maxConcurrent = async () => Math.max(1, Math.min(10, (await agentConfig()).concurrency || 3));
 
 /* 队列泵。
  *
@@ -247,7 +270,7 @@ function pump() {
   if (pumpChain) return pumpChain;
   pumpChain = (async () => {
     try {
-      const slots = maxConcurrent() - (await db.runningCount());
+      const slots = await maxConcurrent() - (await db.runningCount());
       if (slots <= 0) return;
       const jobs = await db.claimQueuedJobs(slots);
       if (!jobs.length) return;
@@ -295,13 +318,13 @@ const routes = {
 
   'GET /api/config': async (req) => {
     const s = await db.getSettings();
-    const cfg = agentConfig();
+    const cfg = await agentConfig();
     const me = await userOf(req);
     const mask = (k) => (k ? k.slice(0, 3) + '••••' + k.slice(-4) : '');
     return {
-      agentReady: agentReady(), visionReady: visionReady(),
-      model: agentReady() ? cfg.model : 'local-mock',
-      promptVersion: PROMPT_VERSION, concurrency: maxConcurrent(),
+      agentReady: await agentReady(), visionReady: await visionReady(),
+      model: await agentReady() ? cfg.model : 'local-mock',
+      promptVersion: PROMPT_VERSION, concurrency: await maxConcurrent(),
       roles: db.ROLES, filmingProgress: db.FILMING_PROGRESS, collabStatus: db.COLLAB_STATUS,
       needsSetup: !me,
       me: me ? { id: me.id, name: me.name, role: me.role } : null,
@@ -321,6 +344,57 @@ const routes = {
     };
   },
 
+  /* ---------- 登录 ----------
+     两段式，共用一个接口：
+       只带口令   → 校验通过后返回成员名单，让人挑自己是谁（不发 cookie）
+       带 userId  → 签发会话
+     这样在口令验过之前不会泄露团队成员姓名。 */
+
+  'GET /api/auth/state': async () => {
+    const s = await db.getSettings();
+    return { needsBootstrap: !s.auth?.passphrase, hasUsers: (await db.listUsers()).length > 0 };
+  },
+
+  // 只有在还没设过口令时可用 —— 设完这个入口就自动关闭
+  'POST /api/auth/bootstrap': async (req) => {
+    const s = await db.getSettings();
+    if (s.auth?.passphrase) throw httpError(409, '口令已经设置过了，请直接登录');
+    const b = await readBody(req);
+    const pass = String(b.passphrase || '');
+    if (pass.length < 6) throw httpError(400, '团队口令至少 6 位');
+    if (!String(b.name || '').trim()) throw httpError(400, '请填写你的姓名');
+    if (!db.ROLES.some((r) => r.id === b.role)) throw httpError(400, '角色不合法');
+
+    await db.saveSettings({ auth: { passphrase: hashPassphrase(pass) }, user: { name: b.name, role: b.role } });
+    const me = (await db.listUsers()).find((u) => u.name === String(b.name).trim());
+    return { ok: true, me: { id: me.id, name: me.name, role: me.role }, _setCookie: sessionCookie(issueSession(me.id)) };
+  },
+
+  'POST /api/auth/login': async (req) => {
+    const s = await db.getSettings();
+    if (!s.auth?.passphrase) throw httpError(409, '还没初始化，请先设置团队口令');
+    const b = await readBody(req);
+    if (!verifyPassphrase(b.passphrase, s.auth.passphrase)) throw httpError(401, '团队口令不对');
+
+    const users = (await db.listUsers()).map((u) => ({ id: u.id, name: u.name, role: u.role }));
+
+    // 第一段：口令对了，把名单给他挑
+    if (!b.userId && !b.name) return { ok: true, needPick: true, users, roles: db.ROLES };
+
+    let me;
+    if (b.userId) {
+      me = (await db.listUsers()).find((u) => u.id === b.userId);
+      if (!me) throw httpError(400, '选择的成员不存在');
+    } else {
+      if (!db.ROLES.some((r) => r.id === b.role)) throw httpError(400, '角色不合法');
+      await db.saveSettings({ user: { name: b.name, role: b.role } });
+      me = (await db.listUsers()).find((u) => u.name === String(b.name).trim());
+    }
+    return { ok: true, me: { id: me.id, name: me.name, role: me.role }, _setCookie: sessionCookie(issueSession(me.id)) };
+  },
+
+  'POST /api/auth/logout': async () => ({ ok: true, _setCookie: clearCookie() }),
+
   'PUT /api/settings': async (req) => {
     const patch = await readBody(req);
     if (patch.user) {
@@ -332,7 +406,7 @@ const routes = {
     if (Object.keys(patch).some((k) => k !== 'user')) await requireUser(req);
     const s = await db.saveSettings(patch);
     pump();
-    return { ok: true, settings: { user: s.user }, agentReady: agentReady(), visionReady: visionReady() };
+    return { ok: true, settings: { user: s.user }, agentReady: await agentReady(), visionReady: await visionReady() };
   },
 
   'POST /api/settings/test': async (req) => {
@@ -360,7 +434,7 @@ const routes = {
     const user = await requireUser(req);
 
     if (imageBase64) {
-      if (!visionReady()) throw httpError(400, '未配置视觉模型，请到「设置 → 视觉模型」填写后再上传截图');
+      if (!await visionReady()) throw httpError(400, '未配置视觉模型，请到「设置 → 视觉模型」填写后再上传截图');
       if (!/^data:image\/(png|jpe?g|webp);base64,/.test(imageBase64)) {
         throw httpError(400, '只支持 PNG / JPG / WebP 图片');
       }
@@ -398,7 +472,7 @@ const routes = {
 
   'GET /api/jobs': async (req) => {
     const me = await userOf(req);
-    if (!me) return { jobs: [], running: 0, concurrency: maxConcurrent() };
+    if (!me) return { jobs: [], running: 0, concurrency: await maxConcurrent() };
     const raw = await db.listJobs(me.id);
 
     // 队列内交叉查重：同一批里可能把同一个达人粘了两次，两条都还没入库
@@ -444,7 +518,7 @@ const routes = {
         tokens: result.usage?.total_tokens || null, dupInDb, dupInQueue,
       } : null };
     });
-    return { jobs, running: await db.runningCount(), concurrency: maxConcurrent() };
+    return { jobs, running: await db.runningCount(), concurrency: await maxConcurrent() };
   },
 
   'GET /api/jobs/:id': async (req, p) => ({ job: await privateOr404(await db.getJob(p.id), req, '任务') }),
@@ -762,7 +836,19 @@ export const server = createServer(async (req, res) => {
     const hit = match(req.method, pathname);
     if (!hit) return send(res, 404, { error: '接口不存在' });
     try {
-      return send(res, 200, await hit.handler(req, hit.params, url));
+      /* 全局守卫：除登录相关外，一律要求有效会话。
+         局域网上线后同网段任何设备都能打到这些接口，
+         逐个路由去记得加守卫迟早会漏一个 —— 默认拦住、显式放行才是对的。 */
+      if (!OPEN_ROUTES.has(pathname)) {
+        if (!(await userOf(req))) throw httpError(401, '请先登录');
+      }
+      const out = await hit.handler(req, hit.params, url);
+      // 处理器想种/清 cookie 时通过 _setCookie 传出来，不直接碰 res
+      if (out && out._setCookie) {
+        const { _setCookie, ...body } = out;
+        return send(res, 200, body, { 'Set-Cookie': _setCookie });
+      }
+      return send(res, 200, out);
     } catch (e) {
       const status = e.status || 500;
       if (status >= 500) console.error('[api]', pathname, e);
@@ -790,10 +876,16 @@ if (process.env.NODE_ENV !== 'test') {
     console.log('  耐萌 · 商务动作入口');
     console.log('  ─────────────────────────────────────────');
     console.log(`  地址    http://localhost:${PORT}`);
-    console.log(`  绑定    ${HOST}${HOST === '127.0.0.1' ? '（仅本机）' : '  ⚠ 局域网可访问，服务没有登录鉴权'}`);
-    console.log(`  识别    ${agentReady() ? `${agentConfig().model} @ ${agentConfig().baseUrl}` : '本地模拟（未配置模型）'}`);
-    console.log(`  截图    ${visionReady() ? agentConfig('vision').model : '未配置视觉模型，暂不支持发货截图'}`);
-    console.log(`  并发    ${maxConcurrent()} 条`);
+    const bootstrapped = Boolean((await db.getSettings()).auth?.passphrase);
+    console.log(`  绑定    ${HOST}${HOST === '127.0.0.1' ? '（仅本机）' : '（局域网可访问）'}`);
+    console.log(`  登录    ${bootstrapped ? '团队口令已设置' : '⚠ 尚未初始化，第一个打开页面的人将设置团队口令'}`);
+    if (HOST !== '127.0.0.1') {
+      // 明文 http 是这套部署的已知取舍，写在启动日志里免得被忘掉
+      console.log('  传输    明文 http，会话 cookie 在同网段可被嗅探');
+    }
+    console.log(`  识别    ${await agentReady() ? `${(await agentConfig()).model} @ ${(await agentConfig()).baseUrl}` : '本地模拟（未配置模型）'}`);
+    console.log(`  截图    ${await visionReady() ? (await agentConfig('vision')).model : '未配置视觉模型，暂不支持发货截图'}`);
+    console.log(`  并发    ${await maxConcurrent()} 条`);
     console.log(`  数据    ./data/db.json   配置 ./data/settings.json`);
     if (backup) console.log(`  备份    ${backup.replace(/.*[\\/]backups[\\/]/, 'data/backups/')}（保留最近 7 份）`);
     if (stale) console.log(`  恢复    ${stale} 条中断的识别任务`);

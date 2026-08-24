@@ -8,20 +8,66 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { mockExtract, locateSources, agentReady, visionReady, PROMPT_VERSION } from '../lib/agent.js';
 import { INTAKE_SAMPLES } from './fixtures/samples.js';
+
+/* 必须在加载 agent/db 之前把数据目录指向临时目录，
+   而且只能用动态 import —— ESM 的静态 import 会被提升到这些赋值之前，
+   写成 `import ... from '../lib/agent.js'` 的话环境变量根本赶不上。
+
+   原来这个文件压根没做隔离，直接读的是真实 data/settings.json：
+   测试结果取决于开发机上有没有配过模型，
+   「未配置 key 时为 false」这条在配过模型的机器上本该红却一直是绿的。 */
+const TMP = mkdtempSync(join(tmpdir(), 'naimeng-agent-'));
+process.env.NAIMENG_DATA_DIR = TMP;
+for (const k of ['LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY',
+  'VISION_BASE_URL', 'VISION_MODEL', 'VISION_API_KEY']) delete process.env[k];
+
+const { mockExtract, locateSources, agentReady, visionReady, agentConfig, PROMPT_VERSION } =
+  await import('../lib/agent.js');
+const db = await import('../lib/db.js');
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 describe('降级路径', () => {
-  test('未配置 key 时 agentReady/visionReady 为 false', () => {
+  test('未配置 key 时 agentReady/visionReady 为 false', async () => {
     // 测试进程里已清空 LLM_* 环境变量
-    assert.equal(typeof agentReady(), 'boolean');
-    assert.equal(typeof visionReady(), 'boolean');
+    assert.equal(await agentReady(), false);
+    assert.equal(await visionReady(), false);
+  });
+
+  /* 这条是补的。原来只断言 typeof === 'boolean' —— 那种写法在
+     agentReady 永远返回 false 时照样通过，正是它让一个真实回归溜了过去：
+     agentConfig 同步调用了已经异步化的 db.getSettings()，拿到的是 Promise，
+     配置全部静默回落到环境变量。界面上「已保存」照常显示，识别却永远走本地模拟。
+     所以必须反向验证：配置齐了就得为 true。 */
+  test('配置齐全后 agentReady 必须变 true —— 只验类型的断言挡不住静默回落', async () => {
+    await db.saveSettings({ model: {
+      provider: 'Fake', baseUrl: 'http://127.0.0.1:9/v1', model: 'fake-1',
+      apiStyle: 'chat', apiKey: 'sk-fake-0000000000',
+    } });
+
+    const cfg = await agentConfig();
+    assert.equal(cfg.baseUrl, 'http://127.0.0.1:9/v1', 'agentConfig 没读到已保存的配置');
+    assert.equal(cfg.model, 'fake-1');
+    assert.ok(cfg.apiKey, 'apiKey 丢了');
+    assert.equal(await agentReady(), true, '配置齐全却仍为 false，识别会一直走本地模拟');
+  });
+
+  test('视觉模型独立配置，不被文本模型带上', async () => {
+    assert.equal(await agentReady(), true, '上一条已配好文本模型');
+    assert.equal(await visionReady(), false, '只配了文本模型，视觉不该被带成 ready');
+
+    await db.saveSettings({ vision: { baseUrl: 'http://127.0.0.1:9/v1', model: 'v', apiKey: 'sk-b0000000000' } });
+    assert.equal(await visionReady(), true);
+    assert.equal((await agentConfig('vision')).model, 'v');
+    assert.equal((await agentConfig()).model, 'fake-1', '两个配置串了');
+
+    await db.saveSettings({ model: { clearApiKey: true }, vision: { clearApiKey: true } });
   });
 
   test('提示词版本号存在，便于留痕比对', () => {

@@ -6,7 +6,7 @@
  * 而 id 是 cb-00012 这种顺序号，遍历成本为零。
  *
  * 锁住四条边界：
- *   1. X-User-Id 决定身份，全局 settings 只是没头部时的兜底
+ *   1. 身份来自服务端签发的会话 cookie，前端伪造不了，也不回落到任何人
  *   2. 识别任务和草稿是私人工作区，别人读不到也删不掉
  *   3. 合作和达人全员可读（记录页的「全部」就是这么用的），但只有归属人能改
  *   4. 视频匹配不跨归属，否则甲的口令会写进乙的合作
@@ -23,17 +23,20 @@ process.env.NODE_ENV = 'test';
 for (const k of ['LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY']) delete process.env[k];
 
 const { server } = await import('../server.js');
+const { makeApi, bootstrap, loginAs } = await import('./helpers/login.js');
 
-let BASE, JIA, YI, prod;
+let BASE, api, JIA, YI, prod;
 
 before(async () => {
   await new Promise((r) => server.listen(0, r));
   BASE = `http://127.0.0.1:${server.address().port}`;
+  api = makeApi(BASE);
 
-  // 两个人依次在设置里登记身份。注意第二次会把全局 settings.user 覆盖成乙 ——
-  // 这正是修复前的病根：此后甲带着自己的 X-User-Id 也会被当成乙。
-  JIA = (await api('PUT', '/api/settings', { user: { name: '商务甲', role: 'business' } })).settings.user.id;
-  YI = (await api('PUT', '/api/settings', { user: { name: '商务乙', role: 'business' } })).settings.user.id;
+  /* 每个人一个真实会话。身份已经是服务端签发的了，
+     测试不能再靠塞请求头来「扮演」某个人 —— 那样就绕开了要验证的东西本身。 */
+  const boot = await bootstrap(BASE, { name: '商务甲', role: 'business' });
+  JIA = boot.cookie;
+  YI = (await loginAs(BASE, { name: '商务乙', role: 'business' })).cookie;
   prod = (await api('POST', '/api/products', { name: '洁齿冻干' }, JIA)).product;
 });
 after(async () => {
@@ -41,28 +44,15 @@ after(async () => {
   try { rmSync(DIR, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-/** as = 用哪个用户的身份发请求；不传就不带头部，走全局兜底 */
-const api = async (method, path, body, as) => {
-  const headers = { 'Content-Type': 'application/json' };
-  if (as) headers['X-User-Id'] = as;
-  const res = await fetch(BASE + path, {
-    method, headers, body: body ? JSON.stringify(body) : undefined,
-  });
-  return { status: res.status, ...(await res.json().catch(() => ({}))) };
-};
-
 /* ================================================================ */
 
-describe('身份由 X-User-Id 决定', () => {
-  test('带甲的头部就返回甲，不被全局设置覆盖', async () => {
-    const r = await api('GET', '/api/config', null, JIA);
-    assert.equal(r.me.id, JIA);
-    assert.equal(r.me.name, '商务甲');
+describe('身份由服务端签发的会话决定', () => {
+  test('甲的会话返回甲', async () => {
+    assert.equal((await api('GET', '/api/config', null, JIA)).me.name, '商务甲');
   });
 
-  test('带乙的头部就返回乙', async () => {
-    const r = await api('GET', '/api/config', null, YI);
-    assert.equal(r.me.id, YI);
+  test('乙的会话返回乙', async () => {
+    assert.equal((await api('GET', '/api/config', null, YI)).me.name, '商务乙');
   });
 
   test('两人身份互不影响 —— 交叉请求各归各的', async () => {
@@ -71,16 +61,24 @@ describe('身份由 X-User-Id 决定', () => {
       api('GET', '/api/config', null, YI),
     ]);
     assert.notEqual(a.me.id, b.me.id);
+    assert.equal(a.me.name, '商务甲');
+    assert.equal(b.me.name, '商务乙');
   });
 
-  test('不带头部时回落到全局设置，单人使用的老行为不变', async () => {
-    const r = await api('GET', '/api/config');
-    assert.equal(r.me.id, YI, '最后一次保存的是乙');
+  test('没有会话就是匿名，不回落到任何人', async () => {
+    /* 改造前这里会回落到全局 settings.user —— 意味着任何未登录请求
+       都自动获得「最后一个保存身份的人」的权限。局域网上线后这是致命的。 */
+    assert.equal((await api('GET', '/api/config', null, '')).status, 401);
   });
 
-  test('头部是不存在的 id 时回落，不当成匿名', async () => {
-    const r = await api('GET', '/api/config', null, 'u-does-not-exist');
-    assert.ok(r.me, '应该回落到全局设置而不是 null');
+  test('伪造签名的会话无效', async () => {
+    const forged = 'naimeng_session=eyJ1IjoidS0wMDAwMSIsImV4cCI6OTk5OTk5OTk5OTk5OX0.fake';
+    assert.equal((await api('GET', '/api/config', null, forged)).status, 401);
+  });
+
+  test('拿别人的 userId 塞进请求头没有用', async () => {
+    const res = await fetch(BASE + '/api/config', { headers: { 'X-User-Id': 'u-00001' } });
+    assert.equal(res.status, 401);
   });
 });
 
@@ -166,7 +164,7 @@ describe('共享业务数据：全员可读，归属人可改', () => {
   });
 
   test('但仓库回填快递单不看归属 —— 卡了就把仓库挡在外面了', async () => {
-    const wh = (await api('PUT', '/api/settings', { user: { name: '仓库专员', role: 'warehouse' } })).settings.user.id;
+    const wh = (await loginAs(BASE, { name: '仓库专员', role: 'warehouse' })).cookie;
     const r = await api('POST', `/api/collaborations/${cbId}/packages`,
       { carrier: '申通', trackingNo: '773000000000001' }, wh);
     assert.equal(r.status, 200);
@@ -178,14 +176,15 @@ describe('共享业务数据：全员可读，归属人可改', () => {
   });
 
   test('归属人离职的兜底：别人可以把达人接到自己名下', async () => {
-    const r = await api('POST', `/api/creators/${creatorId}/transfer`, { toUserId: YI, reason: '甲离职' }, YI);
+    const yiId = (await api('GET', '/api/config', null, YI)).me.id;
+    const r = await api('POST', `/api/creators/${creatorId}/transfer`, { toUserId: yiId, reason: '甲离职' }, YI);
     assert.equal(r.status, 200);
-    assert.equal(r.creator.ownerUserId, YI);
+    assert.equal(r.creator.ownerUserId, yiId);
     assert.equal(r.creator.ownerHistory.at(-1).reason, '甲离职', '谁接的、为什么接必须留痕');
   });
 
   test('但不能替别人转给第三个人', async () => {
-    const bing = (await api('PUT', '/api/settings', { user: { name: '商务丙', role: 'business' } })).settings.user.id;
+    const bing = (await loginAs(BASE, { name: '商务丙', role: 'business' })).me.id;
     // 此刻达人归乙，甲想把它转给丙 —— 这是纯粹的越权，两种合法情形都不沾
     const r = await api('POST', `/api/creators/${creatorId}/transfer`, { toUserId: bing, reason: '乱转' }, JIA);
     assert.equal(r.status, 403);
@@ -263,14 +262,12 @@ describe('裸链接可以手动搜索并选择', () => {
 /* ================================================================ */
 
 describe('花钱和改配置的接口要有身份', () => {
-  test('改模型配置需要身份', async () => {
-    // 直接用一个不存在的库来构造「无身份」很难，这里退而验证：带合法身份能过
-    const r = await api('PUT', '/api/settings', { model: { provider: 'X' } }, JIA);
-    assert.equal(r.status, 200);
+  test('带会话能改模型配置', async () => {
+    assert.equal((await api('PUT', '/api/settings', { model: { provider: 'X' } }, JIA)).status, 200);
   });
 
-  test('只改 user 的请求不被身份守卫拦住 —— 那是建立身份的唯一入口', async () => {
-    const r = await api('PUT', '/api/settings', { user: { name: '新人', role: 'business' } });
-    assert.equal(r.status, 200);
+  test('没有会话时改不了模型配置，也烧不了 token', async () => {
+    assert.equal((await api('PUT', '/api/settings', { model: { provider: 'X' } }, '')).status, 401);
+    assert.equal((await api('POST', '/api/extract', { rawText: 'x' }, '')).status, 401);
   });
 });
