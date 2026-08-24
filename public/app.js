@@ -1709,9 +1709,15 @@ async function loadFeishu() {
   $('#fsSecretHint').textContent = FS.hasSecret ? '已保存' : '未配置';
   $$('#fsEnable button').forEach((b) => b.classList.toggle('on', (b.dataset.on === '1') === Boolean(FS.enabled)));
 
+  /* 只提示「当前这一步」而不是一次甩出全部问题 ——
+     后面几条本来就得等前面做完才可能满足，一起列出来只会让人不知道从哪下手。 */
   const p = $('#fsProblems');
-  if (FS.problems?.length) { p.style.display = ''; p.innerHTML = '<b>还不能开始同步</b>' + FS.problems.map(esc).join('；'); }
-  else p.style.display = 'none';
+  if (FS.problems?.length) {
+    p.style.display = '';
+    p.innerHTML = `<b>下一步</b>${esc(FS.problems[0])}`
+      + (FS.problems.length > 1 ? `<div class="dim" style="margin-top:4px">之后还需要：${
+        FS.problems.slice(1).map(esc).join('；')}</div>` : '');
+  } else p.style.display = 'none';
 
   const q = FS.queue || {};
   $('#fsQueue').innerHTML = q.pending || q.failed
@@ -1719,7 +1725,50 @@ async function loadFeishu() {
       + (q.lastError ? `<div class="dim" style="margin-top:4px">${esc(q.lastError)}</div>` : '')
     : '队列为空';
 
-  if (FS.tableId) { await loadFeishuFields(FS.tableId); $('#fsTableBox').style.display = ''; }
+  /* 映射区块以前默认隐藏，只有测试连接成功才出现 ——
+     而「必须把系统ID映射到一列」这句提示却一直显示，
+     等于让人去做一件界面上根本看不到的事。现在改成常显：
+     连不上时就在原地说清楚卡在哪、下一步做什么。 */
+  if (!FS.appId || !FS.hasSecret || !FS.appToken) {
+    blockMap('先在上面填好 App ID、App Secret 和多维表格链接，再点「测试连接」。'
+      + '连上之后，这里会列出你飞书表里的列供选择。');
+    return;
+  }
+
+  let tables = null;
+  try {
+    const r = await api('POST', '/api/feishu/test', {});
+    tables = r.tables || null;
+    if (!r.ok) {
+      const bad = (r.steps || []).find((x) => !x.ok);
+      blockMap(`连不上飞书，所以读不到列：${bad ? bad.detail : '原因未知'}`);
+      if (tables?.length) fillTableSelect(tables);
+      return;
+    }
+  } catch (e) {
+    blockMap(`连不上飞书，所以读不到列：${e.message}`);
+    return;
+  }
+
+  if (tables?.length) fillTableSelect(tables);
+  if (!FS.tableId) { blockMap('还没选要写入哪张表。在上面的下拉里选一张，这里就会列出它的列。'); return; }
+  await loadFeishuFields(FS.tableId);
+}
+
+/** 读不到列时，把原因和下一步显示在映射区，而不是让那块空着 */
+function blockMap(reason) {
+  $('#fsMap').innerHTML = '';
+  const b = $('#fsMapBlocked');
+  b.style.display = '';
+  b.innerHTML = `<b>暂时还列不出飞书的列</b>${esc(reason)}`;
+}
+
+function fillTableSelect(tables) {
+  const sel = $('#fsTable'); sel.innerHTML = '';
+  sel.append(el('option', null, '— 选择数据表 —'));
+  tables.forEach((t) => { const o = el('option', null, esc(t.name)); o.value = t.tableId; sel.append(o); });
+  sel.value = FS?.tableId || '';
+  $('#fsTableBox').style.display = '';
 }
 
 async function loadFeishuFields(tableId) {
@@ -1735,6 +1784,7 @@ async function loadFeishuFields(tableId) {
  * 只列出可写的列 —— 公式、自动编号、创建时间那些是只读的，选了也写不进去。
  */
 function renderFeishuMap(writable) {
+  $('#fsMapBlocked').style.display = 'none';
   const box = $('#fsMap'); box.innerHTML = '';
   (FS.sourceFields || []).forEach((sf) => {
     const row = el('div');
@@ -1758,9 +1808,36 @@ function renderFeishuMap(writable) {
     sel.onchange = () => { FS.mapping = { ...FS.mapping, [sf.id]: sel.value }; };
 
     row.append(lab, sel); box.append(row);
+
+    /* 系统ID 是同步的前提，但让用户自己去飞书加列很容易卡住 ——
+       加错类型（比如选了「自动编号」）这一列根本不可写，
+       而界面上只表现为「下拉里没有它」，没人猜得到原因。
+       所以没映射时直接给一个按钮，由系统去建。 */
+    if (sf.required && !sel.value) {
+      const help = el('div');
+      help.style.cssText = 'grid-column:2;margin:-2px 0 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+      const mk = el('button', 'btn sm primary', '在飞书表里创建这一列');
+      mk.onclick = async () => {
+        mk.disabled = true; mk.textContent = '创建中…';
+        try {
+          const r = await api('POST', '/api/feishu/create-field', { name: '系统ID' });
+          await loadFeishuFields(FS.tableId);
+          FS.mapping = { ...FS.mapping, systemId: r.field.name };
+          renderFeishuMap(new Set(writable));
+          msg('#fsMsg', r.already ? '这一列已经存在，已自动选中' : '已创建「系统ID」列并选中，记得点保存');
+        } catch (e) { msg('#fsMsg', e.message, false); mk.disabled = false; mk.textContent = '在飞书表里创建这一列'; }
+      };
+      help.append(mk, el('span', 'dim', '会在表末尾加一列多行文本，不影响已有数据'));
+      box.append(help);
+    }
   });
 
-  if (!FS_FIELDS.length) box.append(el('div', 'dim', '这张表还没有列，或读取失败'));
+  if (!FS_FIELDS.length) {
+    box.append(el('div', 'dim', '这张表还没有列，或读取失败'));
+  } else if (!FS_FIELDS.some((f) => writable.has(f.type))) {
+    box.append(el('div', 'alert warn',
+      '<b>这张表没有可写入的列</b>公式、自动编号、创建时间这类是只读的，写不进去。请先在飞书里加一列多行文本。'));
+  }
 }
 
 $$('#fsEnable button').forEach((b) => {
@@ -1781,16 +1858,21 @@ $('#fsTest').onclick = async () => {
       tableId: FS?.tableId || null,
     });
     out.className = 'testout on ' + (r.ok ? 'ok' : 'bad');
-    out.innerHTML = r.steps.map((s) =>
-      `<div>${s.ok ? '✓' : '✗'} <b>${esc(s.step)}</b> — ${esc(s.detail)}</div>`).join('');
+    out.innerHTML = r.steps.map((s) => {
+      let h = `<div>${s.ok ? '✓' : '✗'} <b>${esc(s.step)}</b> — ${esc(s.detail)}</div>`;
+      // 表名和 table_id 一起列出来，方便和飞书侧边栏逐个对照
+      if (s.tables?.length) {
+        h += '<div style="margin:6px 0 0 16px;font-size:11.5px;font-family:ui-monospace,monospace">'
+          + s.tables.map((t) => `${esc(t.name)}　<span class="dim">${esc(t.tableId)}</span>`).join('<br>')
+          + '</div>';
+      }
+      if (s.note) h += `<div class="dim" style="margin:4px 0 0 16px;font-size:11.5px">${esc(s.note)}</div>`;
+      return h;
+    }).join('');
 
     if (r.tables?.length) {
-      const sel = $('#fsTable'); sel.innerHTML = '';
-      sel.append(el('option', null, '— 选择数据表 —'));
-      r.tables.forEach((t) => { const o = el('option', null, esc(t.name)); o.value = t.tableId; sel.append(o); });
-      sel.value = FS?.tableId || '';
-      $('#fsTableBox').style.display = '';
-      if (sel.value) await loadFeishuFields(sel.value);
+      fillTableSelect(r.tables);
+      if ($('#fsTable').value) await loadFeishuFields($('#fsTable').value);
     }
   } catch (e) { out.className = 'testout on bad'; out.textContent = e.message; }
   finally { $('#fsTest').disabled = false; }

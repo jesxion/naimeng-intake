@@ -231,6 +231,50 @@ describe('配置校验与自检', () => {
     assert.match(badCred.steps[0].detail, /app_id|app_secret/);
   });
 
+  test('列表分页：表多于一页时要翻完，不能只拿第一页', async () => {
+    /* 这是「今天好好的、以后表多了才静默少数据」的那类坑。
+       用户已经遇到过「侧边栏 4 张、只识别出 3 张」的困惑 ——
+       那次的原因是仪表盘不算数据表，但分页确实是另一个会造成同样症状的原因。 */
+    /* 必须超过单页上限（飞书是 100）才会真的触发翻页。
+       第一版只造了 7 张，客户端一次请求 100 条就全拿到了 ——
+       把分页代码删掉测试照样绿，是个空转的用例。 */
+    const many = Array.from({ length: 150 }, (_, i) => ({ table_id: `tblX${i}`, name: `表${i}` }));
+    const backup = fake.state.tables;
+    fake.state.tables = many;
+    try {
+      const got = await feishu.listTables({ appId: 'cli_test', appSecret: 'secret_test' }, 'appTokenSample');
+      assert.equal(got.length, 150, `只拿到 ${got.length} 张，分页没翻完`);
+      assert.deepEqual(got.map((t) => t.name), many.map((t) => t.name));
+    } finally { fake.state.tables = backup; }
+  });
+
+  test('测试连接会把表名和 table_id 一起报出来', async () => {
+    // 用户没法凭「找到 N 张表」这一句判断少的是哪一张
+    const r = await feishu.testConnection(
+      { appId: 'cli_test', appSecret: 'secret_test' }, 'appTokenSample');
+    const step = r.steps.find((s) => s.step === '访问多维表格');
+    assert.ok(step.tables?.length, '没有列出表清单');
+    assert.ok(step.tables[0].tableId, '缺 table_id，没法和飞书侧边栏对照');
+    assert.match(step.note || '', /仪表盘|表单/, '要说明哪些东西不算数据表');
+  });
+
+  test('能在飞书表里建「系统ID」列 —— 不必让用户手工加', async () => {
+    /* 让用户自己去飞书加列是可以的，但那一步很容易卡住：
+       类型选成「自动编号」这一列就不可写，而界面上只表现为
+       「映射下拉里没有它」，没人猜得到原因。 */
+    const cfg = { appId: 'cli_test', appSecret: 'secret_test' };
+    const before = (await feishu.listFields(cfg, 'appTokenSample', 'tblSample')).length;
+
+    const f = await feishu.createField(cfg, 'appTokenSample', 'tblSample', '新建列测试', 1);
+    assert.equal(f.name, '新建列测试');
+
+    const after = await feishu.listFields(cfg, 'appTokenSample', 'tblSample');
+    assert.equal(after.length, before + 1);
+    const made = after.find((x) => x.name === '新建列测试');
+    assert.equal(made.type, 1, '必须建成多行文本 —— 其它类型可能不可写');
+    assert.ok(feishu.WRITABLE_TYPES.has(made.type), '新建的列必须是可写类型');
+  });
+
   test('从分享链接里解析 app_token', () => {
     assert.equal(
       feishu.parseAppToken('https://gcnss99go2yu.feishu.cn/base/BZHJbRYP9aMsXisYD2QcnpLqnke?from=from_copylink'),

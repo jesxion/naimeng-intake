@@ -402,6 +402,26 @@ const routes = {
     return { fields, writable: [...feishu.WRITABLE_TYPES] };
   },
 
+  /* 在飞书表里建一列。只用于「系统ID」这种同步必需、
+     但让用户手工加又很容易加错类型的列。 */
+  'POST /api/feishu/create-field': async (req) => {
+    await requireUser(req);
+    const b = await readBody(req);
+    const s = await db.getSettings();
+    const f = s.feishu || {};
+    const tableId = b.tableId || f.tableId;
+    if (!f.appId || !f.appSecret || !f.appToken || !tableId) throw httpError(400, '请先填好凭据并选择数据表');
+    const name = String(b.name || '').trim();
+    if (!name) throw httpError(400, '请填写列名');
+
+    const cfg = { appId: f.appId, appSecret: f.appSecret };
+    const exists = (await feishu.listFields(cfg, f.appToken, tableId)).find((x) => x.name === name);
+    if (exists) return { ok: true, already: true, field: exists };
+
+    const created = await feishu.createField(cfg, f.appToken, tableId, name, 1);
+    return { ok: true, already: false, field: created };
+  },
+
   'POST /api/feishu/sync-now': async (req) => {
     const me = await requireUser(req);
     const b = await readBody(req);

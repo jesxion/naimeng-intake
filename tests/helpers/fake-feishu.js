@@ -68,10 +68,35 @@ export function startFakeFeishu({ appId = 'cli_test', appSecret = 'secret_test' 
       const [, appToken, tableId, kind, tail] = m;
 
       if (appToken !== 'appTokenSample') return err(res, 91402, 'app not found');
-      if (!tableId) return json(res, { code: 0, data: { items: state.tables } });
+      if (!tableId) {
+        // 照抄飞书的分页：一次最多给 page_size 条，还有就给 page_token
+        const size = Number(url.searchParams.get('page_size') || 20);
+        const from = Number(url.searchParams.get('page_token') || 0);
+        const slice = state.tables.slice(from, from + size);
+        const next = from + size;
+        return json(res, { code: 0, data: {
+          items: slice,
+          has_more: next < state.tables.length,
+          page_token: next < state.tables.length ? String(next) : undefined,
+        } });
+      }
       if (!state.tables.some((t) => t.table_id === tableId)) return err(res, 91402, 'table not found');
 
-      if (kind === 'fields') return json(res, { code: 0, data: { items: state.fields } });
+      if (kind === 'fields') {
+        if (req.method === 'POST') {
+          if (state.fields.some((f) => f.field_name === body.field_name)) {
+            return err(res, 1254001, 'field name already exists');
+          }
+          const f = {
+            field_id: 'f' + (state.fields.length + 1),
+            field_name: body.field_name,
+            type: body.type || 1,
+          };
+          state.fields.push(f);
+          return json(res, { code: 0, data: { field: f } });
+        }
+        return json(res, { code: 0, data: { items: state.fields } });
+      }
 
       if (kind === 'records') {
         const typeOf = (name) => state.fields.find((f) => f.field_name === name)?.type;

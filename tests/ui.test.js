@@ -205,6 +205,36 @@ describe('角色裁剪', () => {
 
 /* ================================================================ */
 
+describe('飞书同步设置', () => {
+  test('列映射区块不能默认隐藏', () => {
+    /* 这是真实踩过的坑：映射区块默认 display:none，只有测试连接成功才出现，
+       而「必须把系统ID映射到一列」这条提示却一直显示 ——
+       等于让人去做一件界面上根本看不到的事。
+       提示指向的控件必须一直在；连不上时在原地说明原因，而不是整块藏起来。 */
+    const box = html.match(/<div id="fsTableBox"[^>]*>/);
+    assert.ok(box, '找不到映射区块');
+    assert.ok(!/display\s*:\s*none/.test(box[0]),
+      '映射区块默认隐藏了，用户看不到提示要他做的事');
+  });
+
+  test('读不到飞书列时，在映射区原地说明原因', () => {
+    assert.match(app, /function blockMap\(/);
+    assert.match(fn('loadFeishu'), /blockMap\(/);
+    assert.ok(html.includes('id="fsMapBlocked"'), '缺少说明位');
+  });
+
+  test('系统ID 没映射时提供「去飞书建这一列」', () => {
+    // 手工加列很容易加错类型（选成自动编号就不可写），
+    // 而界面上只表现为「下拉里没有这一列」，没人猜得到原因
+    assert.match(app, /\/api\/feishu\/create-field/);
+    assert.match(fn('renderFeishuMap'), /sf\.required && !sel\.value/);
+  });
+
+  test('问题清单只提示当前这一步，不一次甩出全部', () => {
+    assert.match(fn('loadFeishu'), /FS\.problems\[0\]/);
+  });
+});
+
 describe('源码卫生', () => {
   test('没有控制字符混进源码', () => {
     for (const [name, text] of [['public/app.js', app], ['public/index.html', html]]) {
