@@ -258,6 +258,30 @@ describe('配置校验与自检', () => {
     assert.match(step.note || '', /仪表盘|表单/, '要说明哪些东西不算数据表');
   });
 
+  test('保存时把分享链接归一成 app_token，不存原始 URL', async () => {
+    /* 用户粘的是整条分享链接，而它会被直接拼进接口路径。
+       存原始链接的话，凡是没记得调 parseAppToken 的调用点全部 404，
+       返回的还是 HTML 错误页 —— 报错只说「不是 JSON」，极难定位。
+       所以在**保存这个边界上**归一，而不是指望每个调用点都记得解析。 */
+    const url = 'https://gcnss99go2yu.feishu.cn/base/appTokenSample?table=tblSample&view=vew1';
+    const s = await db.saveSettings({ feishu: { appToken: url } });
+    assert.equal(s.feishu.appToken, 'appTokenSample', '存进去的还是整条 URL');
+
+    // 已经是纯 token 的不要被改坏
+    assert.equal((await db.saveSettings({ feishu: { appToken: 'appTokenSample' } })).feishu.appToken,
+      'appTokenSample');
+  });
+
+  test('路径里混进 URL 或空段时就地拒绝，不发出去换一个 404', async () => {
+    await assert.rejects(
+      () => feishu.listFields({ appId: 'cli_test', appSecret: 'secret_test' },
+        'https://x.feishu.cn/base/ABC', 'tblSample'),
+      /路径拼错/);
+    await assert.rejects(
+      () => feishu.listFields({ appId: 'cli_test', appSecret: 'secret_test' }, '', 'tblSample'),
+      /路径拼错/);
+  });
+
   test('能在飞书表里建「系统ID」列 —— 不必让用户手工加', async () => {
     /* 让用户自己去飞书加列是可以的，但那一步很容易卡住：
        类型选成「自动编号」这一列就不可写，而界面上只表现为
