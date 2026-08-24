@@ -253,6 +253,17 @@ rsync -a ~/apps/naimeng-intake/data/ /Volumes/备份盘/naimeng-data/
 tail -f data/server.log
 ```
 
+飞书那块出问题时，先用这个脚本看一眼对面的真实结构 —— 它只读，
+凭据从 `data/settings.json` 里取，不会打印 Secret：
+
+```bash
+node tools/feishu-inspect.js                  # 列出这个多维表格里的所有表
+node tools/feishu-inspect.js tbl2zfl51fVdGq5n  # 看某张表有哪些列、什么类型
+```
+
+界面上「下拉里没有这一列」通常有两种原因，这个脚本能分辨：
+列压根不存在，还是存在但类型只读（公式、自动编号、创建时间这类写不进去）。
+
 ---
 
 ## 11. 这套方案的边界
