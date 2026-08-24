@@ -1,0 +1,247 @@
+/**
+ * 飞书多维表格同步回归。
+ *
+ * 全程打在本地假服务上（tests/helpers/fake-feishu.js），
+ * 不碰真实凭据也不动公司正在用的那张表。
+ *
+ * 锁住四件事：
+ *   1. 同步失败绝不影响商务干活 —— 这是整个设计的前提
+ *   2. 同一条合作重复推送是更新不是新建（否则飞书表里会堆重复行）
+ *   3. 值按飞书列类型转换 —— 类型不对飞书直接报错且不说是哪一列
+ *   4. 错误码翻译成能照着做的话，尤其 91403
+ */
+import { test, describe, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+import { startFakeFeishu } from './helpers/fake-feishu.js';
+
+const DIR = mkdtempSync(join(tmpdir(), 'naimeng-feishu-'));
+process.env.NAIMENG_DATA_DIR = DIR;
+
+let fake, db, sync, feishu, store, me, prod;
+
+before(async () => {
+  fake = await startFakeFeishu();
+  process.env.FEISHU_BASE = fake.origin + '/open-apis';
+
+  db = await import('../lib/db.js');
+  sync = await import('../lib/sync.js');
+  feishu = await import('../lib/feishu.js');
+  store = await import('../lib/store.js');
+
+  me = (await db.saveSettings({ user: { name: '商务甲', role: 'business' } })).user;
+  prod = await db.saveProduct({ name: '洁齿冻干' });
+  await db.saveSettings({ feishu: {
+    enabled: true,
+    appId: 'cli_test', appSecret: 'secret_test',
+    appToken: 'appTokenSample', tableId: 'tblSample', tableName: '达人寄样信息',
+    mapping: {
+      systemId: '系统ID', creatorName: '达人名称', douyinIds: '抖音号',
+      status: '合作状态', sampleCost: '寄样费用', notified: '已告知达人',
+      createdAt: '建档时间', trackingNos: '快递单号',
+    },
+  } });
+});
+
+after(async () => {
+  await fake?.close();
+  delete process.env.FEISHU_BASE;
+  try { rmSync(DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
+async function newCollab(nickname, douyinId, uid) {
+  const creator = await db.createCreator({
+    name: nickname,
+    recipient: { name: '张某某', phone: '13800138000', address: '示例省示例市示范路1号' },
+    accounts: [{ nickname, douyinId, uid }],
+  }, me.id);
+  const accounts = (await db.getCreator(creator.id)).accounts;
+  return db.createCollaboration({
+    creatorId: creator.id,
+    recipient: { name: '张某某', phone: '13800138000', address: '示例省示例市示范路1号' },
+    items: [{ productId: prod.id, productName: prod.name, quantity: 2 }],
+    accountIds: accounts.map((a) => a.id),
+  }, me.id);
+}
+
+/* ================================================================ */
+
+describe('值按飞书列类型转换', () => {
+  test('数字列收到数字，不是字符串', () => {
+    assert.equal(sync.coerce('88.5', 2), 88.5);
+    assert.equal(sync.coerce('不是数字', 2), null);
+  });
+
+  test('日期列收到毫秒时间戳', () => {
+    const t = sync.coerce('2026-08-01T00:00:00.000Z', 5);
+    assert.equal(typeof t, 'number');
+    assert.equal(new Date(t).toISOString(), '2026-08-01T00:00:00.000Z');
+  });
+
+  test('复选框的空是 false 而不是留空', () => {
+    // 留空会被飞书当成「没传这一列」，已告知又变回未告知就看不出来了
+    assert.equal(sync.coerce(null, 7), false);
+    assert.equal(sync.coerce(true, 7), true);
+  });
+
+  test('布尔值写进文本列时转成「是/否」，不是 true/false', () => {
+    assert.equal(sync.coerce(true, 1), '是');
+    assert.equal(sync.coerce(false, 1), '否');
+  });
+
+  test('超链接列要的是对象不是字符串', () => {
+    assert.deepEqual(sync.coerce('https://v.douyin.com/AB/', 15),
+      { text: 'https://v.douyin.com/AB/', link: 'https://v.douyin.com/AB/' });
+  });
+
+  test('空值留空，不写 "null" 这种字符串进表', () => {
+    assert.equal(sync.coerce(null, 1), null);
+    assert.equal(sync.coerce('', 1), null);
+    assert.equal(sync.coerce(undefined, 2), null);
+  });
+});
+
+/* ================================================================ */
+
+describe('推送', () => {
+  let cb;
+
+  test('建合作会自动入队 —— 不靠路由层记得调用', async () => {
+    cb = await newCollab('豆豆的小窝', '100000031', '20000000031');
+    const q = await sync.queueStatus();
+    assert.ok(q.pending >= 1, '建合作后队列里应该有待推送');
+  });
+
+  test('推送成功后飞书里有这条记录，字段类型都对', async () => {
+    const r = await sync.pump({ force: true });
+    assert.equal(r.failed, 0, `推送失败：${JSON.stringify(r)}`);
+    assert.equal(fake.state.records.size, 1);
+
+    const rec = [...fake.state.records.values()][0];
+    assert.equal(rec['系统ID'], cb.id);
+    assert.equal(rec['达人名称'], '豆豆的小窝');
+    assert.equal(rec['抖音号'], '100000031');
+    assert.equal(rec['合作状态'], '待寄样');
+    assert.equal(typeof rec['已告知达人'], 'boolean');
+    assert.equal(typeof rec['建档时间'], 'number');
+  });
+
+  test('推完队列清空', async () => {
+    assert.equal((await sync.queueStatus()).pending, 0);
+  });
+
+  test('同一条合作再改是更新不是新建', async () => {
+    await db.addPackage(cb.id, { carrier: '申通', trackingNo: '773000000000001' });
+    const r = await sync.pump({ force: true });
+    assert.equal(r.failed, 0);
+    assert.equal(fake.state.records.size, 1, '重复推送在飞书表里堆出了新行');
+
+    const rec = [...fake.state.records.values()][0];
+    assert.equal(rec['合作状态'], '已寄样', '状态没跟着更新');
+    assert.equal(rec['快递单号'], '773000000000001');
+  });
+
+  test('本地映射丢了也不会重复建行 —— 按系统ID列找回来', async () => {
+    // 模拟换机器/重建库：清掉本地 record_id 映射
+    for (const l of store.all('sync_links')) store.remove('sync_links', l.id);
+    await db.markNotified(cb.id, true);
+    const r = await sync.pump({ force: true });
+    assert.equal(r.failed, 0);
+    assert.equal(fake.state.records.size, 1, '映射丢失后又新建了一行');
+    assert.equal([...fake.state.records.values()][0]['已告知达人'], true);
+  });
+
+  test('记录被人在飞书里删了 → 重新建一条，而不是一直重试失败', async () => {
+    const recId = [...fake.state.records.keys()][0];
+    fake.state.records.delete(recId);
+    await db.markNotified(cb.id, false);
+    const r = await sync.pump({ force: true });
+    assert.equal(r.failed, 0, '记录被删后应该能自愈');
+    assert.equal(fake.state.records.size, 1);
+  });
+});
+
+/* ================================================================ */
+
+describe('失败不影响商务干活', () => {
+  test('飞书拒绝权限时，业务动作照样成功', async () => {
+    fake.state.denyPermission = true;
+    try {
+      const cb2 = await newCollab('权限测试达人', '100000032', '20000000032');
+      assert.ok(cb2?.id, '飞书不可用时建合作也必须成功');
+
+      const r = await sync.pump({ force: true });
+      assert.ok(r.failed > 0 || r.error, '这次推送应该是失败的');
+
+      // 业务数据完好
+      assert.ok(await db.getCollaboration(cb2.id));
+    } finally { fake.state.denyPermission = false; }
+  });
+
+  test('失败会留在队列里等重试，不会丢', async () => {
+    const q = await sync.queueStatus();
+    assert.ok(q.pending + q.failed >= 1, '失败的推送应该还在队列里');
+    assert.ok(q.lastError, '应该记下失败原因');
+  });
+
+  test('91403 被翻译成「应用没被加进这张表」而不是干巴巴的 Forbidden', async () => {
+    const q = await sync.queueStatus();
+    assert.match(q.lastError, /添加文档应用|没有权限/,
+      `错误信息没翻译，用户不知道该去改什么：${q.lastError}`);
+  });
+
+  test('恢复后重试能成功', async () => {
+    const r = await sync.pump({ force: true });
+    assert.equal(r.failed, 0, `恢复后仍失败：${JSON.stringify(r)}`);
+    assert.equal(fake.state.records.size, 2);
+  });
+
+  test('pump 永不抛异常 —— 它是被业务动作顺手触发的', async () => {
+    const bad = await db.getSettings();
+    await db.saveSettings({ feishu: { appToken: 'appTokenWrong' } });
+    const r = await sync.pump({ force: true });   // 不该 throw
+    assert.ok(r, 'pump 抛异常了，会污染商务的操作结果');
+    await db.saveSettings({ feishu: { appToken: 'appTokenSample' } });
+    assert.ok(bad);
+  });
+});
+
+/* ================================================================ */
+
+describe('配置校验与自检', () => {
+  test('没映射系统ID时明确拒绝 —— 否则每次推送都新建，表里会堆重复行', async () => {
+    const s = { feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', mapping: {} } };
+    assert.equal(sync.isEnabled(s), false);
+    assert.match(sync.configProblems(s).join(' '), /系统ID/);
+  });
+
+  test('测试连接逐级报告，卡在哪一级说哪一级', async () => {
+    const cfg = { appId: 'cli_test', appSecret: 'secret_test' };
+    const good = await feishu.testConnection(cfg, 'appTokenSample', 'tblSample');
+    assert.equal(good.ok, true);
+    assert.equal(good.steps.length, 3);
+    assert.ok(good.fields.some((f) => f.name === '系统ID'));
+
+    const badCred = await feishu.testConnection({ appId: 'x', appSecret: 'y' }, 'appTokenSample');
+    assert.equal(badCred.ok, false);
+    assert.equal(badCred.steps[0].step, '凭据校验');
+    assert.match(badCred.steps[0].detail, /app_id|app_secret/);
+  });
+
+  test('从分享链接里解析 app_token', () => {
+    assert.equal(
+      feishu.parseAppToken('https://gcnss99go2yu.feishu.cn/base/BZHJbRYP9aMsXisYD2QcnpLqnke?from=from_copylink'),
+      'BZHJbRYP9aMsXisYD2QcnpLqnke');
+    assert.equal(feishu.parseAppToken('https://example.com/x'), '');
+  });
+
+  test('令牌被缓存，不会每推一条就换一次', async () => {
+    const before = fake.state.tokenIssued;
+    await feishu.listTables({ appId: 'cli_test', appSecret: 'secret_test' }, 'appTokenSample');
+    await feishu.listTables({ appId: 'cli_test', appSecret: 'secret_test' }, 'appTokenSample');
+    assert.equal(fake.state.tokenIssued, before, '令牌接口有频率限制，不能每次都换');
+  });
+});

@@ -239,3 +239,58 @@ describe('配置与业务数据分离', () => {
     assert.equal((await db.getSettings()).model.apiKey, '');
   });
 });
+
+/* ================================================================ */
+
+describe('db 层的类型与身份契约', () => {
+  test('上游传数字 uid 时归一成字符串，否则同一个号会被插两条', async () => {
+    /* 这条不是理论洁癖。addAccountsSync 的去重比较是
+         x.uid === String(a.uid)
+       如果第一次插入时 uid 存成了 Number，第二次拿字符串来比就对不上，
+       同一个抖音号会在同一个达人下重复建账号 —— 实测过，确实会变成 2 条。
+       store 层只归一了「列」，JSON 载荷里的类型得 db 层自己管。 */
+    const u = (await db.saveSettings({ user: { name: '类型测试员', role: 'business' } })).user;
+    const c = await db.createCreator({ name: '类型达人', accounts: [{ nickname: 'n', uid: 20000000031 }] }, u.id);
+    await db.addAccounts(c.id, [{ nickname: 'n', uid: '20000000031' }]);   // 同一个号，这次是字符串
+
+    const got = await db.getCreator(c.id);
+    assert.equal(got.accounts.length, 1, '同一个号被插了两条，去重失效');
+    assert.equal(typeof got.accounts[0].uid, 'string', 'uid 必须是字符串');
+  });
+
+  test('合作码同样归一 —— 必须喂数字才能打到这条防线', async () => {
+    /* 喂字符串的话 String() 是空操作，去掉它测试也不会红（这个坑在
+       store.test.js 里踩过一次）。所以这里故意传 Number。
+       注意：数字形态的合作码前导零在到达这里之前就已经没了，
+       String() 救不回来 —— 它保证的是「不会以 Number 形态存进去」，
+       否则后续所有 === 字符串比较都会静默失配。 */
+    const u = (await db.saveSettings({ user: { name: '合作码测试员', role: 'business' } })).user;
+    const c = await db.createCreator({
+      name: '合作码达人',
+      accounts: [{ nickname: 'm', douyinId: '100000099', cooperationCode: 4000000099 }],
+    }, u.id);
+    const got = await db.getCreator(c.id);
+    assert.equal(typeof got.accounts[0].cooperationCode, 'string', '合作码存成了数字');
+    assert.equal(got.accounts[0].cooperationCode, '4000000099');
+  });
+
+  test('字符串形态的前导零合作码原样保留', async () => {
+    const u = (await db.saveSettings({ user: { name: '前导零测试员', role: 'business' } })).user;
+    const c = await db.createCreator({
+      name: '前导零达人',
+      accounts: [{ nickname: 'z', douyinId: '100000098', cooperationCode: '04000000098' }],
+    }, u.id);
+    assert.equal((await db.getCreator(c.id)).accounts[0].cooperationCode, '04000000098');
+  });
+
+  test('没有会话就是匿名：currentUser(null) 返回 null，不回落到任何人', async () => {
+    /* server 层的 userOf 在没有有效会话时会直接返回 null，
+       根本不会调到这里 —— 所以这条抓的是「契约」而不是「现在有没有洞」。
+       写下来是因为这个回落曾经真实存在过：任何未登录请求都会自动
+       获得「最后一个保存过身份的人」的权限。 */
+    assert.equal(await db.currentUser(null), null);
+    assert.equal(await db.currentUser(''), null);
+    assert.equal(await db.currentUser(undefined), null);
+    assert.equal(await db.currentUser('u-does-not-exist'), null, '不存在的 id 也不能回落');
+  });
+});

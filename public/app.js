@@ -1525,6 +1525,7 @@ function openSettings(panel) { $('#settings').classList.add('on'); if (panel) sw
 function switchPanel(name) {
   $$('.settings nav button').forEach((b) => b.classList.toggle('on', b.dataset.panel === name));
   $$('.spanel').forEach((p) => p.classList.toggle('on', p.id === 'sp-' + name));
+  if (name === 'feishu') loadFeishu();   // 每次进来重新拉状态，队列数要是实时的
 }
 $('#openSettings').onclick = () => openSettings();
 $('#closeSettings').onclick = () => { $('#settings').classList.remove('on'); };
@@ -1692,3 +1693,140 @@ function renderProductList() {
   });
   t.append(tb); box.append(t);
 }
+
+/* ================================================================ 飞书同步设置 */
+
+let FS = null;      // /api/feishu/state 的结果
+let FS_FIELDS = []; // 当前所选表的列
+
+async function loadFeishu() {
+  try { FS = await api('GET', '/api/feishu/state'); } catch { return; }
+
+  $('#fsAppId').value = FS.appId || '';
+  $('#fsToken').value = FS.appToken || '';
+  $('#fsSecret').value = '';
+  $('#fsSecret').placeholder = FS.hasSecret ? FS.secretMasked + '（留空不修改）' : 'xxxxxxxxxxxx';
+  $('#fsSecretHint').textContent = FS.hasSecret ? '已保存' : '未配置';
+  $$('#fsEnable button').forEach((b) => b.classList.toggle('on', (b.dataset.on === '1') === Boolean(FS.enabled)));
+
+  const p = $('#fsProblems');
+  if (FS.problems?.length) { p.style.display = ''; p.innerHTML = '<b>还不能开始同步</b>' + FS.problems.map(esc).join('；'); }
+  else p.style.display = 'none';
+
+  const q = FS.queue || {};
+  $('#fsQueue').innerHTML = q.pending || q.failed
+    ? `待推送 ${q.pending}${q.failed ? ` · <span style="color:var(--red)">失败 ${q.failed}</span>` : ''}`
+      + (q.lastError ? `<div class="dim" style="margin-top:4px">${esc(q.lastError)}</div>` : '')
+    : '队列为空';
+
+  if (FS.tableId) { await loadFeishuFields(FS.tableId); $('#fsTableBox').style.display = ''; }
+}
+
+async function loadFeishuFields(tableId) {
+  try {
+    const r = await api('GET', '/api/feishu/fields?tableId=' + encodeURIComponent(tableId));
+    FS_FIELDS = r.fields;
+    renderFeishuMap(new Set(r.writable));
+  } catch (e) { msg('#fsMsg', e.message, false); }
+}
+
+/**
+ * 列映射。每一行是「本系统字段 → 飞书列」。
+ * 只列出可写的列 —— 公式、自动编号、创建时间那些是只读的，选了也写不进去。
+ */
+function renderFeishuMap(writable) {
+  const box = $('#fsMap'); box.innerHTML = '';
+  (FS.sourceFields || []).forEach((sf) => {
+    const row = el('div');
+    row.style.cssText = 'display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;margin-bottom:7px';
+
+    const lab = el('div');
+    lab.innerHTML = `<span style="font-size:12.5px">${esc(sf.label)}</span>`
+      + (sf.required ? '<span class="tag miss" style="margin-left:5px">必填</span>' : '');
+    if (sf.hint) lab.title = sf.hint;
+
+    const sel = el('select');
+    sel.append(el('option', null, '— 不同步 —'));
+    FS_FIELDS.filter((f) => writable.has(f.type)).forEach((f) => {
+      const o = el('option', null, `${esc(f.name)}（${esc(f.typeName)}）`);
+      o.value = f.name;
+      // 类型不在建议范围内时给个提醒，但不禁止 —— 用户可能有自己的理由
+      if (sf.suit?.length && !sf.suit.includes(f.type)) o.textContent += ' ⚠ 类型可能不合适';
+      sel.append(o);
+    });
+    sel.value = FS.mapping?.[sf.id] || '';
+    sel.onchange = () => { FS.mapping = { ...FS.mapping, [sf.id]: sel.value }; };
+
+    row.append(lab, sel); box.append(row);
+  });
+
+  if (!FS_FIELDS.length) box.append(el('div', 'dim', '这张表还没有列，或读取失败'));
+}
+
+$$('#fsEnable button').forEach((b) => {
+  b.onclick = () => {
+    $$('#fsEnable button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+  };
+});
+
+$('#fsTest').onclick = async () => {
+  const out = $('#fsTestOut'); out.className = 'testout on'; out.textContent = '正在连接…';
+  $('#fsTest').disabled = true;
+  try {
+    const r = await api('POST', '/api/feishu/test', {
+      appId: $('#fsAppId').value.trim(),
+      appSecret: $('#fsSecret').value.trim(),
+      appToken: $('#fsToken').value.trim(),
+      tableId: FS?.tableId || null,
+    });
+    out.className = 'testout on ' + (r.ok ? 'ok' : 'bad');
+    out.innerHTML = r.steps.map((s) =>
+      `<div>${s.ok ? '✓' : '✗'} <b>${esc(s.step)}</b> — ${esc(s.detail)}</div>`).join('');
+
+    if (r.tables?.length) {
+      const sel = $('#fsTable'); sel.innerHTML = '';
+      sel.append(el('option', null, '— 选择数据表 —'));
+      r.tables.forEach((t) => { const o = el('option', null, esc(t.name)); o.value = t.tableId; sel.append(o); });
+      sel.value = FS?.tableId || '';
+      $('#fsTableBox').style.display = '';
+      if (sel.value) await loadFeishuFields(sel.value);
+    }
+  } catch (e) { out.className = 'testout on bad'; out.textContent = e.message; }
+  finally { $('#fsTest').disabled = false; }
+};
+
+$('#fsTable').onchange = async () => {
+  const sel = $('#fsTable');
+  FS.tableId = sel.value;
+  FS.tableName = sel.options[sel.selectedIndex]?.textContent || '';
+  if (sel.value) await loadFeishuFields(sel.value);
+};
+
+$('#fsSave').onclick = async () => {
+  try {
+    await api('PUT', '/api/settings', { feishu: {
+      enabled: $('#fsEnable button.on')?.dataset.on === '1',
+      appId: $('#fsAppId').value.trim(),
+      appSecret: $('#fsSecret').value.trim(),
+      appToken: $('#fsToken').value.trim(),
+      tableId: FS?.tableId || '',
+      tableName: FS?.tableName || '',
+      mapping: FS?.mapping || {},
+    } });
+    await loadFeishu();
+    msg('#fsMsg', '已保存');
+  } catch (e) { msg('#fsMsg', e.message, false); }
+};
+
+$('#fsSyncNow').onclick = async () => {
+  if (!confirm('把所有合作重新推一遍到飞书？已存在的行会被更新，不会重复建行。')) return;
+  $('#fsSyncNow').disabled = true;
+  msg('#fsMsg', '同步中…');
+  try {
+    const r = await api('POST', '/api/feishu/sync-now', { all: true, scope: 'all' });
+    msg('#fsMsg', `已推送 ${r.done || 0} 条${r.failed ? `，失败 ${r.failed} 条` : ''}`);
+    await loadFeishu();
+  } catch (e) { msg('#fsMsg', e.message, false); }
+  finally { $('#fsSyncNow').disabled = false; }
+};

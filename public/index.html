@@ -464,6 +464,7 @@ tbody tr:hover{background:#fbfcff}
       <button data-panel="model">模型设置</button>
       <button data-panel="vision">视觉模型</button>
       <button data-panel="products">寄样产品</button>
+      <button data-panel="feishu">飞书同步</button>
       <button data-panel="workflow">流程设置</button>
       <div class="navnote" id="setupNote" style="display:none">首次使用请先填写用户设置，否则无法录入。</div>
     </nav>
@@ -546,6 +547,55 @@ tbody tr:hover{background:#fbfcff}
         <div style="margin-top:22px" id="prodList"></div>
       </div>
 
+
+      <div class="spanel" id="sp-feishu">
+        <h3>飞书多维表格同步</h3>
+        <p>商务改动合作信息后，自动推到公司现用的飞书表里，让不进本系统的人也能看到同一份数据。
+          <b>单向推送</b>：被同步的那几列在飞书里手工改，会被下一次推送覆盖。</p>
+
+        <div class="alert warn" id="fsProblems" style="display:none"></div>
+
+        <div class="frow"><label>启用</label>
+          <div class="seg" id="fsEnable">
+            <button data-on="0" class="on">关闭</button><button data-on="1">开启</button>
+          </div></div>
+
+        <div class="frow2">
+          <div class="frow"><label>App ID</label><input id="fsAppId" class="mono" placeholder="cli_xxxxxxxx"></div>
+          <div class="frow"><label>App Secret</label><input id="fsSecret" type="password" class="mono" autocomplete="off">
+            <div class="hint" id="fsSecretHint"></div></div>
+        </div>
+        <div class="hint" style="margin:-6px 0 14px">
+          在飞书开发者后台建一个<b>企业自建应用</b>，权限里勾上多维表格的读写。
+          <b style="color:var(--red)">光申请权限还不够</b> —— 还要打开那张多维表格，
+          右上角「…」→「更多」→「添加文档应用」，把这个应用加进去，否则一律没权限。
+        </div>
+
+        <div class="frow"><label>多维表格链接</label>
+          <input id="fsToken" placeholder="https://xxx.feishu.cn/base/xxxxxxxx"></div>
+
+        <div class="sfoot" style="margin-top:0;padding-top:0;border:0">
+          <button class="btn" id="fsTest">测试连接</button>
+          <span class="muted" id="fsMsg"></span>
+        </div>
+        <div class="testout" id="fsTestOut"></div>
+
+        <div id="fsTableBox" style="display:none">
+          <div class="frow"><label>写入哪张表</label><select id="fsTable"></select></div>
+          <div class="frow"><label>列映射</label>
+            <div class="hint" style="margin-bottom:8px">
+              左边是本系统的字段，右边选飞书表里的列。留空表示不同步这一项。
+            </div>
+            <div id="fsMap"></div>
+          </div>
+        </div>
+
+        <div class="sfoot">
+          <button class="btn primary" id="fsSave">保存</button>
+          <button class="btn" id="fsSyncNow">立即全量同步</button>
+          <span class="muted" id="fsQueue"></span>
+        </div>
+      </div>
       <div class="spanel" id="sp-workflow">
         <h3>流程设置</h3>
         <p>回访节奏和告知达人的话术模板。</p>

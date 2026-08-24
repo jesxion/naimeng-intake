@@ -19,6 +19,8 @@ import {
   COOKIE_NAME, parseCookies, readSession, issueSession, sessionCookie, clearCookie,
   hashPassphrase, verifyPassphrase,
 } from './lib/auth.js';
+import * as feishu from './lib/feishu.js';
+import * as sync from './lib/sync.js';
 import { extract, extractShipment, agentReady, agentConfig, visionReady, testConnection, PROMPT_VERSION } from './lib/agent.js';
 import {
   normalize, sanitizeForStore, validateForAction, validateVideoSubmit,
@@ -342,6 +344,73 @@ const routes = {
       },
       stats: await db.stats(),
     };
+  },
+
+
+  /* ---------- 飞书多维表格同步 ----------
+     单向推送：本系统 → 飞书。被同步的列在飞书里手改会被下次推送覆盖。
+     所有接口都要求商务角色 —— 这里能看到 App Secret 的掩码和表结构。 */
+
+  'GET /api/feishu/state': async (req) => {
+    await requireUser(req);
+    const s = await db.getSettings();
+    const f = s.feishu || {};
+    return {
+      enabled: Boolean(f.enabled),
+      appId: f.appId || '',
+      hasSecret: Boolean(f.appSecret),
+      secretMasked: f.appSecret ? f.appSecret.slice(0, 3) + '••••' + f.appSecret.slice(-4) : '',
+      appToken: f.appToken || '',
+      tableId: f.tableId || '',
+      tableName: f.tableName || '',
+      mapping: { ...(f.mapping || {}) },
+      sourceFields: sync.SOURCE_FIELDS.map(({ id, label, suit, required, hint }) =>
+        ({ id, label, suit, required: Boolean(required), hint: hint || '' })),
+      fieldTypeNames: feishu.FIELD_TYPE,
+      problems: sync.configProblems(s),
+      queue: await sync.queueStatus(),
+    };
+  },
+
+  /* 测试连接。逐级往下探 —— 凭据、Base、表、字段是四个不同的失败原因，
+     混成一句「连接失败」的话用户不知道该改什么。 */
+  'POST /api/feishu/test': async (req) => {
+    await requireUser(req);
+    const b = await readBody(req);
+    const s = await db.getSettings();
+    const appId = b.appId || s.feishu?.appId;
+    const appSecret = (b.appSecret && !/^[*•]+$/.test(b.appSecret)) ? b.appSecret : s.feishu?.appSecret;
+    const appToken = feishu.parseAppToken(b.appToken || s.feishu?.appToken);
+    if (!appId || !appSecret) throw httpError(400, '请先填写 App ID 和 App Secret');
+    if (!appToken) throw httpError(400, '多维表格链接不对，应形如 https://xxx.feishu.cn/base/xxxxx');
+
+    feishu.clearTokenCache();   // 测试时不要用缓存的旧令牌
+    try {
+      return await feishu.testConnection({ appId, appSecret }, appToken, b.tableId || null);
+    } catch (e) {
+      return { ok: false, steps: [{ ok: false, step: '连接', detail: e.message }] };
+    }
+  },
+
+  'GET /api/feishu/fields': async (req, p, url) => {
+    await requireUser(req);
+    const s = await db.getSettings();
+    const f = s.feishu || {};
+    const tableId = url.searchParams.get('tableId') || f.tableId;
+    if (!f.appId || !f.appSecret || !f.appToken || !tableId) throw httpError(400, '配置不完整');
+    const fields = await feishu.listFields({ appId: f.appId, appSecret: f.appSecret }, f.appToken, tableId);
+    return { fields, writable: [...feishu.WRITABLE_TYPES] };
+  },
+
+  'POST /api/feishu/sync-now': async (req) => {
+    const me = await requireUser(req);
+    const b = await readBody(req);
+    const s = await db.getSettings();
+    if (!sync.isEnabled(s)) throw httpError(400, sync.configProblems(s).join('；') || '同步未启用');
+    // 全量重推用于换表、改映射、或飞书那边被误删之后
+    const n = b.all ? await sync.enqueueAll(b.scope === 'all' ? null : me.id) : 0;
+    const r = await sync.pump({ force: true });
+    return { queued: n, ...r, queue: await sync.queueStatus() };
   },
 
   /* ---------- 登录 ----------
@@ -843,6 +912,11 @@ export const server = createServer(async (req, res) => {
         if (!(await userOf(req))) throw httpError(401, '请先登录');
       }
       const out = await hit.handler(req, hit.params, url);
+      // 写操作之后顺手推一次飞书。故意不 await，也不管成败 ——
+      // 同步失败绝不能影响商务这次操作的结果。
+      if (req.method !== 'GET' && !pathname.startsWith('/api/feishu/')) {
+        sync.pump().catch(() => {});
+      }
       // 处理器想种/清 cookie 时通过 _setCookie 传出来，不直接碰 res
       if (out && out._setCookie) {
         const { _setCookie, ...body } = out;
@@ -886,10 +960,18 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(`  识别    ${await agentReady() ? `${(await agentConfig()).model} @ ${(await agentConfig()).baseUrl}` : '本地模拟（未配置模型）'}`);
     console.log(`  截图    ${await visionReady() ? (await agentConfig('vision')).model : '未配置视觉模型，暂不支持发货截图'}`);
     console.log(`  并发    ${await maxConcurrent()} 条`);
-    console.log(`  数据    ./data/db.json   配置 ./data/settings.json`);
+    console.log(`  数据    ./data/naimeng.db   配置 ./data/settings.json`);
     if (backup) console.log(`  备份    ${backup.replace(/.*[\\/]backups[\\/]/, 'data/backups/')}（保留最近 7 份）`);
     if (stale) console.log(`  恢复    ${stale} 条中断的识别任务`);
+    const fq = await sync.queueStatus();
+    const fs2 = await db.getSettings();
+    console.log(`  飞书    ${sync.isEnabled(fs2)
+      ? `已启用，待推送 ${fq.pending} 条` : '未启用（设置 → 飞书同步）'}`);
     console.log('');
     pump();
+    /* 出站队列的兜底轮询。
+       正常情况下写操作后会立刻推一次，这个定时器负责两种情况：
+       上次失败等退避的、以及服务重启前积压的。 */
+    setInterval(() => { sync.pump().catch(() => {}); }, 60_000).unref();
   });
 }

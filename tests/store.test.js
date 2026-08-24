@@ -6,7 +6,7 @@
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -213,5 +213,59 @@ describe('从 db.json 导入', () => {
     const r = importFromJson(join(DIR, 'does-not-exist.json'));
     assert.equal(r.skipped, true);
     assert.match(r.reason, /全新库/);
+  });
+});
+
+/* ================================================================ */
+
+describe('db.js 已经跑在 SQLite 上', () => {
+  test('数据落进 naimeng.db，不再写 db.json', async () => {
+    const DIR = mkdtempSync(join(tmpdir(), 'naimeng-onsqlite-'));
+    process.env.NAIMENG_DATA_DIR = DIR;
+    const db = await import('../lib/db.js?onsqlite');
+
+    await db.saveProduct({ name: '洁齿冻干' });
+    assert.ok(existsSync(join(DIR, 'naimeng.db')), '没有生成 SQLite 文件');
+    assert.ok(!existsSync(join(DIR, 'db.json')), 'db.json 不该被重新创建');
+
+    try { rmSync(DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  test('老 db.json 会被自动迁入，且原件保留', async () => {
+    const DIR = mkdtempSync(join(tmpdir(), 'naimeng-legacy-'));
+    writeFileSync(join(DIR, 'db.json'), JSON.stringify({
+      schemaVersion: 2, _seq: 50,
+      users: [{ id: 'u-1', name: '商务甲', role: 'business' }],
+      creators: [{ id: 'cr-1', name: '豆豆', ownerUserId: 'u-1', createdAt: '2026-08-01T00:00:00.000Z' }],
+      accounts: [{ id: 'ac-1', creatorId: 'cr-1', uid: '20000000031',
+        douyinId: '100000031', cooperationCode: '04000000031' }],
+      products: [], collaborations: [], collab_items: [], collab_accounts: [],
+      packages: [], drafts: [], intake_logs: [], jobs: [], other_accounts: [],
+    }), 'utf8');
+    process.env.NAIMENG_DATA_DIR = DIR;
+    const db = await import('../lib/db.js?legacy');
+
+    const c = await db.getCreator('cr-1');
+    assert.equal(c.name, '豆豆');
+    assert.equal(c.accounts[0].cooperationCode, '04000000031', '前导零穿过迁移丢了');
+    assert.ok(existsSync(join(DIR, 'db.json')), '原件必须保留，出问题要能对账');
+
+    try { rmSync(DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  test('_seq 承接，新 id 不会和历史撞车', async () => {
+    const DIR = mkdtempSync(join(tmpdir(), 'naimeng-seq2-'));
+    writeFileSync(join(DIR, 'db.json'), JSON.stringify({
+      schemaVersion: 2, _seq: 164,
+      users: [], creators: [], accounts: [], products: [], collaborations: [],
+      collab_items: [], collab_accounts: [], packages: [], drafts: [],
+      intake_logs: [], jobs: [], other_accounts: [],
+    }), 'utf8');
+    process.env.NAIMENG_DATA_DIR = DIR;
+    const db = await import('../lib/db.js?seq2');
+    const p = await db.saveProduct({ name: 'x' });
+    assert.equal(p.id, 'pd-00165', `发号从 ${p.id} 开始，会覆盖历史 id`);
+
+    try { rmSync(DIR, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 });
