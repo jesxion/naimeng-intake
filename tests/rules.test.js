@@ -13,6 +13,7 @@ import {
   normalize, validateForAction, validateVideoSubmit, sanitizeForStore, buildTodos, cleanValue,
   normalizeShipmentRows, matchShipments, scoreShipmentMatch, maskedPhoneParts,
 } from '../lib/rules.js';
+import * as rules from '../lib/rules.js';
 import { mockExtract } from '../lib/agent.js';
 import { INTAKE_SAMPLES, VIDEO_SAMPLES } from './fixtures/samples.js';
 
@@ -374,5 +375,71 @@ describe('告知达人文案', () => {
 
   test('无包裹时不留下空行', () => {
     assert.equal(renderNotifyText('已寄出\n{物流}\n请查收', { ...cb, packages: [] }), '已寄出\n请查收');
+  });
+});
+
+/* ================================================================ */
+
+describe('不寄样的合作', () => {
+  test('needsSample 覆盖两种不寄样类型', () => {
+    assert.equal(rules.needsSample('寄样合作'), true);
+    assert.equal(rules.needsSample('不寄样合作'), false);
+    /* 直播定向本来就不寄实物 —— 提示词里早写着 recipient 可以全为 null，
+       只是校验层一直没跟上，建档后照样落成「待寄样」并催快递单号。 */
+    assert.equal(rules.needsSample('直播定向'), false);
+  });
+
+  test('类型不认识时按寄样处理 —— 宁可多问，不可放行', () => {
+    /* 反过来（未知类型当不寄样）意味着一个拼错的字符串就能绕过
+       收件信息的必填校验，而表现是「东西寄不出去」。 */
+    assert.equal(rules.needsSample('打错的类型'), true);
+    assert.equal(rules.needsSample(undefined), true);
+  });
+
+  test('不寄样时不拦收件信息和产品', () => {
+    const form = { type: '不寄样合作', accounts: [{ douyinId: '100000061' }], recipient: {}, items: [] };
+    const v = rules.validateForAction(form, 'submitSample');
+    assert.equal(v.ok, true, v.blocking.join('；'));
+    assert.deepEqual(v.blocking, []);
+  });
+
+  test('寄样合作照样拦 —— 这套校验的意义就在这里', () => {
+    const form = { type: '寄样合作', accounts: [{ douyinId: '100000062' }], recipient: {}, items: [] };
+    const v = rules.validateForAction(form, 'submitSample');
+    assert.equal(v.ok, false);
+    assert.match(v.blocking.join('；'), /收件人/);
+    assert.match(v.blocking.join('；'), /产品/);
+  });
+
+  test('账号仍然必填 —— 不寄样不等于什么都不要', () => {
+    const v = rules.validateForAction({ type: '不寄样合作', accounts: [], recipient: {} }, 'submitSample');
+    assert.equal(v.ok, false);
+    assert.match(v.blocking.join('；'), /抖音号|UID/);
+  });
+
+  test('不寄样的合作不催产品、不催快递单号', () => {
+    const base = { id: 'cb-1', creatorName: 'x', status: '进行中', createdAt: new Date(Date.now() - 9e8).toISOString(),
+      updatedAt: new Date().toISOString(), items: [], packages: [], fulfillments: [] };
+    const noship = rules.buildTodos({ collaborations: [{ ...base, type: '不寄样合作' }] });
+    assert.equal(noship.filter((t) => t.type === 'complete_info').length, 0, '不寄样却催补产品');
+    assert.equal(noship.filter((t) => t.type === 'fill_tracking').length, 0, '不寄样却催快递单号');
+
+    /* 对照组：同样的数据换成寄样合作，这两条待办必须出现 ——
+       否则上面两条断言可能只是因为 buildTodos 整个没跑。 */
+    const ship = rules.buildTodos({ collaborations: [{ ...base, type: '寄样合作', status: '待寄样' }] });
+    assert.ok(ship.some((t) => t.type === 'complete_info'));
+    assert.ok(ship.some((t) => t.type === 'fill_tracking'));
+  });
+
+  test('类型会被带到 form 上，不再一路丢掉', () => {
+    /* 之前 normalize 不输出 type、sanitizeForStore 不保留 type、
+       路由也不传 type —— 三处都断了，结果所有合作都落成「寄样合作」。 */
+    const f = rules.normalize({ cooperation_type: '不寄样合作', accounts: [] }).form;
+    assert.equal(f.type, '不寄样合作');
+    assert.equal(rules.sanitizeForStore(f).type, '不寄样合作');
+  });
+
+  test('类型白名单化后才入库 —— 不接受任意字符串', () => {
+    assert.equal(rules.sanitizeForStore({ type: '<script>' }).type, '寄样合作');
   });
 });

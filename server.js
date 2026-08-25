@@ -750,7 +750,7 @@ const routes = {
       .map((a) => a.id);
 
     const collaboration = await db.createCollaboration({
-      creatorId, recipient: form.recipient, sampleCost: form.sampleCost,
+      creatorId, type: form.type, recipient: form.recipient, sampleCost: form.sampleCost,
       items: form.items, accountIds: accountIds.length ? accountIds : creator.accounts.map((a) => a.id),
     }, user.id);
 

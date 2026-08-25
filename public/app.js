@@ -574,6 +574,7 @@ function openIntakeDrawer() {
   const draft = el('button', 'btn', '存草稿');
   draft.onclick = saveDraft;
   const rec = el('button', 'btn', '仅建档，暂不寄样');
+  rec.id = 'recOnly';
   rec.onclick = () => submitCollaboration('createRecord');
   const smp = el('button', 'btn primary', '确认并提交寄样');
   smp.id = 'submitSample';
@@ -595,12 +596,20 @@ function openIntakeDrawer() {
     <div class="rh">抖音账号 <span id="acctNote"></span></div>
     <div id="gAcct"></div>
     <div style="margin-bottom:12px"><button class="btn sm" id="addAcct">+ 再加一个账号</button></div>
-    <div class="rh">寄样产品 <span id="itemNote"></span></div>
-    <div id="gItems"></div>
-    <div style="margin:8px 0 12px"><button class="btn sm" id="addItem">+ 再加一个产品</button></div>
-    <div class="fgrid" id="gCost"></div>
-    <div class="rh">收件信息</div>
-    <div id="gRecip"></div>`;
+    <div class="rh">合作类型</div>
+    <div class="seg" id="typeSeg" style="margin-bottom:12px"></div>
+    <div id="shipBlock">
+      <div class="rh">寄样产品 <span id="itemNote"></span></div>
+      <div id="gItems"></div>
+      <div style="margin:8px 0 12px"><button class="btn sm" id="addItem">+ 再加一个产品</button></div>
+      <div class="fgrid" id="gCost"></div>
+      <div class="rh">收件信息</div>
+      <div id="gRecip"></div>
+    </div>
+    <div id="shipFold" style="display:none;margin-bottom:12px">
+      <button class="btn sm" id="unfoldShip">展开产品和收件信息</button>
+      <span class="dim" style="margin-left:8px">不寄样合作不需要填，展开只是备用</span>
+    </div>`;
   $('#drRight').innerHTML = `
     <div class="rh">原文 · 点字段高亮出处 <span id="srcMeta"></span></div>
     <div class="src" id="srcPre"></div>
@@ -610,6 +619,8 @@ function openIntakeDrawer() {
     <button class="btn sm" id="merge" style="margin-top:8px">合并识别</button>
     <div class="rh" id="counts" style="margin-top:14px"></div>
     <div class="rh" id="agentInfo"></div>`;
+
+  $('#unfoldShip').onclick = () => { S.shipUnfolded = true; renderForm(); };
 
   $('#addAcct').onclick = () => { S.form.accounts.push({ nickname: '', douyinId: '', uid: '', cooperationCode: '', profileUrl: '' }); renderForm(); };
   $('#addItem').onclick = () => { S.form.items.push({ productId: null, productName: '', quantity: 1 }); renderItems(); recount(); };
@@ -644,9 +655,46 @@ function setPath(path, v) {
   o[seg[seg.length - 1]] = v;
 }
 
+/** 合作类型。和 rules.js 的 COLLAB_TYPES 一致 —— ui.test.js 有断言守着不许分叉 */
+const COLLAB_TYPES = ['寄样合作', '不寄样合作', '直播定向'];
+const uiNeedsSample = (t) => t === '寄样合作';
+
+function renderTypeSeg() {
+  const seg = $('#typeSeg'); if (!seg) return;
+  seg.innerHTML = '';
+  COLLAB_TYPES.forEach((t) => {
+    const b = el('button', S.form.type === t ? 'on' : null, t);
+    b.onclick = () => {
+      S.form.type = t;
+      /* 切回寄样时一定要展开 —— 折着的话必填项在屏幕上根本不存在，
+         而提交会被拦下并说「缺收件人」，人只会一头雾水。 */
+      if (uiNeedsSample(t)) S.shipUnfolded = true;
+      renderForm();
+    };
+    seg.append(b);
+  });
+}
+
 function renderForm() {
   const F = S.form, M = S.fieldMeta || {};
   F.items ||= []; if (F.sampleCost === undefined) F.sampleCost = null;
+  F.type ||= '寄样合作';
+  renderTypeSeg();
+
+  /* 不寄样的合作把产品和收件整块折起来。字段还在（偶尔想顺手记一笔地址），
+     只是默认不占地方，也不再算「待补充」。 */
+  const fold = !uiNeedsSample(F.type) && !S.shipUnfolded;
+  const sb = $('#shipBlock'), sf = $('#shipFold');
+  if (sb) sb.style.display = fold ? 'none' : '';
+  if (sf) sf.style.display = fold ? '' : 'none';
+
+  const smp = $('#submitSample');
+  if (smp) {
+    /* 不寄样就没有「提交寄样」这一步。留着一个按不动的按钮比藏起来更让人困惑。 */
+    smp.style.display = uiNeedsSample(F.type) ? '' : 'none';
+  }
+  const rec = $('#recOnly');
+  if (rec) rec.textContent = uiNeedsSample(F.type) ? '仅建档，暂不寄样' : '建档';
 
   $('#creatorNote').textContent = S.creatorId
     ? '账号已存在，本次只新增一条合作记录' : '库里没有这个账号，会同时建达人档案';
@@ -790,8 +838,14 @@ function mark(src) {
 
 function recount() {
   let miss = 0, chk = 0;
+  /* 藏起来的字段不算「待补充」—— 不寄样合作把产品和收件整块折起来了，
+     照旧统计的话会一直提示补充几个屏幕上根本看不见的东西，
+     而 Alt+N 还会往一个不可见的输入框上跳。 */
+  const visible = (node) => !node.closest('[style*="display:none"], [style*="display: none"]');
+
   $$('#drLeft .f').forEach((f) => {
     const i = f.querySelector('input'); if (!i || i.type === 'number') return;
+    if (!visible(f)) { f.className = 'f'; f.querySelector('label .tag')?.remove(); return; }
     const lab = f.querySelector('label'); if (!lab) return;
     const old = lab.querySelector('.tag');
     const empty = !i.value.trim();
@@ -817,15 +871,21 @@ function recount() {
 
   const F = S.form, w = [];
   const r = F.recipient || {};
+  const ship = uiNeedsSample(F.type);
   const hasItems = F.items.some((i) => i.productId && Number(i.quantity) > 0);
   if (!F.accounts.some((a) => a.douyinId || a.uid)) w.push('每个账号都缺抖音号和 UID，无法入库');
-  if (!hasItems) w.push('未选寄样产品');
-  if (!r.name || !r.phone || !r.address) w.push('收件信息不全');
+  /* 产品和收件只对寄样合作是问题。对不寄样的合作提这两条是噪音，
+     而且会让人误以为自己漏填了什么。 */
+  if (ship && !hasItems) w.push('未选寄样产品');
+  if (ship && (!r.name || !r.phone || !r.address)) w.push('收件信息不全');
   if (F.accounts.some((a) => !a.cooperationCode)) w.push('有账号缺合作码（不影响寄样，影响后续开定向）');
   const fw = $('#fWarn');
-  if (fw) fw.textContent = w.length ? w.join('；') : '信息完整，可以提交寄样';
+  if (fw) {
+    fw.textContent = w.length ? w.join('；')
+      : ship ? '信息完整，可以提交寄样' : '信息完整，可以建档';
+  }
   const ss = $('#submitSample');
-  if (ss) ss.disabled = !hasItems || !r.name || !r.phone || !r.address;
+  if (ss) ss.disabled = !ship || !hasItems || !r.name || !r.phone || !r.address;
 }
 
 function jumpNext() {
@@ -1570,7 +1630,7 @@ async function loadRecords() {
       published ? `已出片 ${published}/${cb.fulfillments.length}` : ''].filter(Boolean).join(' · ');
     tr.innerHTML = `<td><b>${esc(cb.creatorName || '未命名达人')}</b>
         <div class="mono dim">${accs}</div></td>
-      <td><span class="st ${cb.status === '已完成' ? 'done' : 'queued'}">${esc(cb.status)}</span></td>
+      <td><span class="st ${cb.status === '已完成' ? 'done' : cb.status === '进行中' ? 'running' : 'queued'}">${esc(cb.status)}</span></td>
       <td>${items}</td><td class="mono">${pkgs}</td>
       <td class="dim">${esc(prog)}</td>
       <td>${syncPill(states[cb.id])}</td>`;

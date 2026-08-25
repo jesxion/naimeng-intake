@@ -293,3 +293,52 @@ describe('记录表的飞书同步列', () => {
       '只说「同步失败」对排查毫无帮助，必须显示飞书返回的原因');
   });
 });
+
+/* ================================================================ */
+
+describe('不寄样合作的录入界面', () => {
+  test('前端的类型列表和 rules.js 不分叉', () => {
+    /* 两份列表各写一遍的话，后端加了类型前端选不到，或者前端能选一个
+       后端不认的值 —— 后者会被白名单静默改回「寄样合作」，
+       表现是「我明明选了不寄样，存进去还是寄样」。 */
+    const rules = readFileSync(join(ROOT, 'lib/rules.js'), 'utf8');
+    const back = rules.match(/COLLAB_TYPES = (\[[^\]]*\])/)[1];
+    const front = app.match(/COLLAB_TYPES = (\[[^\]]*\])/)[1];
+    assert.equal(front.replace(/\s/g, ''), back.replace(/\s/g, ''));
+  });
+
+  test('有类型选择器，且切换会重渲染', () => {
+    // 抽屉骨架是 openIntakeDrawer 里拼的，不在 index.html
+    assert.ok(app.includes('id="typeSeg"'), '缺类型选择器');
+    assert.match(fn('renderTypeSeg'), /S\.form\.type = t/);
+    assert.match(fn('renderTypeSeg'), /renderForm\(\)/);
+  });
+
+  test('切回寄样时强制展开 —— 折着的必填项等于不存在', () => {
+    /* 折叠状态下提交会被拦下并说「缺收件人」，
+       而那个输入框在屏幕上根本看不见，人只会一头雾水。 */
+    assert.match(fn('renderTypeSeg'), /uiNeedsSample\(t\)[\s\S]{0,40}shipUnfolded = true/);
+  });
+
+  test('折叠的字段不计入待补充，Alt+N 也不往那儿跳', () => {
+    const r = fn('recount');
+    assert.match(r, /display:\s*none|display: none/, 'recount 没有排除隐藏字段');
+    assert.match(r, /if \(!visible\(f\)\)/);
+  });
+
+  test('不寄样时不提示「未选寄样产品」「收件信息不全」', () => {
+    const r = fn('recount');
+    assert.match(r, /ship && !hasItems/);
+    assert.match(r, /ship && \(!r\.name/);
+  });
+
+  test('不寄样时藏掉「提交寄样」按钮', () => {
+    // 留一个按不动的按钮比藏起来更让人困惑
+    assert.match(fn('renderForm'), /submitSample[\s\S]{0,160}uiNeedsSample\(F\.type\)/);
+  });
+
+  test('记录表能筛「进行中」，且它和已完成不是一个颜色', () => {
+    assert.match(html, /data-status="进行中"/);
+    assert.match(fn('loadRecords'), /进行中[\s\S]{0,20}running/);
+  });
+});

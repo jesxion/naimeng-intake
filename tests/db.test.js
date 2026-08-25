@@ -294,3 +294,32 @@ describe('db 层的类型与身份契约', () => {
     assert.equal(await db.currentUser('u-does-not-exist'), null, '不存在的 id 也不能回落');
   });
 });
+
+/* ================================================================ */
+
+describe('不寄样合作的初始状态', () => {
+  test('不寄样直接进「进行中」，不落成「待寄样」', async () => {
+    /* 落成「待寄样」的话，表里会一直挂着一个永远不会被寄的东西 ——
+       筛选「待寄样」的人以为有活要干，点进去才发现根本不需要寄。 */
+    for (const t of ['不寄样合作', '直播定向']) {
+      const cb = await db.createCollaboration({ creatorId: 'cr-1', type: t, accountIds: ['ac-1'] }, 'u-1');
+      assert.equal(cb.status, '进行中', `${t} 的初始状态不对`);
+      assert.equal(cb.type, t, '类型没存进去');
+    }
+  });
+
+  test('寄样合作仍然是「待寄样」', async () => {
+    const cb = await db.createCollaboration({ creatorId: 'cr-1', type: '寄样合作', accountIds: ['ac-1'] }, 'u-1');
+    assert.equal(cb.status, '待寄样');
+  });
+
+  test('没传类型时按寄样处理', async () => {
+    const cb = await db.createCollaboration({ creatorId: 'cr-1', accountIds: ['ac-1'] }, 'u-1');
+    assert.equal(cb.type, '寄样合作');
+    assert.equal(cb.status, '待寄样');
+  });
+
+  test('「进行中」在状态枚举里 —— 否则筛选和统计会漏掉它', () => {
+    assert.ok(db.COLLAB_STATUS.includes('进行中'));
+  });
+});
