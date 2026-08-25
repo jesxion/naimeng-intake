@@ -22,6 +22,7 @@ import {
 import * as feishu from './lib/feishu.js';
 import * as sync from './lib/sync.js';
 import * as logs from './lib/logs.js';
+import * as shots from './lib/shots.js';
 import { extract, extractShipment, agentReady, agentConfig, visionReady, testConnection, PROMPT_VERSION } from './lib/agent.js';
 import {
   normalize, sanitizeForStore, validateForAction, validateVideoSubmit,
@@ -571,7 +572,11 @@ const routes = {
       if (!/^data:image\/(png|jpe?g|webp);base64,/.test(imageBase64)) {
         throw httpError(400, '只支持 PNG / JPG / WebP 图片');
       }
-      const job = await db.createJob({ ownerUserId: user.id, kind: 'shipment', imageBase64, rawText: '' });
+      /* 先把原图存下来再排队。识别完 imageBase64 会被清掉（几 MB 一张，
+         留在库里会把每天的备份撑爆），但存档那份要留着核对 ——
+         单号对不上时只有原图能说明是模型看错了还是仓库发错了。 */
+      const shotId = shots.save(imageBase64);
+      const job = await db.createJob({ ownerUserId: user.id, kind: 'shipment', imageBase64, rawText: '', shotId });
       pump();
       return { job: { ...job, imageBase64: undefined } };
     }
@@ -587,12 +592,16 @@ const routes = {
   'POST /api/shipments/confirm': async (req) => {
     await requireUser(req);
     const { items = [], jobId } = await readBody(req);
+    /* 把这批包裹和它们来自哪张截图绑起来。回填之后 job 会被删掉，
+       不在这里记的话，那张图就再也找不到是谁用过了。 */
+    const shotId = jobId ? (await db.getJob(jobId))?.shotId || null : null;
     const done = [];
     const failed = [];
     for (const it of items) {
       if (!it.collaborationId || !it.trackingNo) continue;
       try {
-        const cb = await db.addPackage(it.collaborationId, { carrier: it.carrier, trackingNo: it.trackingNo, source: 'screenshot' });
+        const cb = await db.addPackage(it.collaborationId,
+          { carrier: it.carrier, trackingNo: it.trackingNo, source: 'screenshot', shotId });
         if (cb) done.push({ collaborationId: cb.id, creatorName: cb.creatorName, trackingNo: it.trackingNo, status: cb.status });
         else failed.push({ trackingNo: it.trackingNo, error: '合作不存在' });
       } catch (e) {
@@ -627,7 +636,7 @@ const routes = {
       if (j.result?.form) conflictOf.set(j.id, await db.findConflicts(j.result.form.accounts || []));
     }));
 
-    const jobs = raw.map(({ result, imageBase64, ...j }) => {
+    const jobs = raw.map(({ result, imageBase64, ...j }) => {   // shotId 保留：预览要用
       let dupInQueue = null;
       let dupInDb = null;
       if (result?.form) {
@@ -958,6 +967,17 @@ const routes = {
     return { creator: await db.getCreator(p.id) };
   },
 
+  /* ---------- 发货截图存档 ---------- */
+
+  /* 原图不放静态目录 —— 那等于同网段谁都能按 id 猜着看。
+     走接口，和其他数据一样要求登录。 */
+  'GET /api/shots/:id': async (req, p) => {
+    await requireUser(req);
+    const shot = shots.read(p.id);
+    if (!shot) throw httpError(404, '原图已清理或不存在');
+    return { _raw: shot.buffer, _mime: shot.mime };
+  },
+
   /* ---------- 日志 ---------- */
 
   /* 日志对全员可见。6 个人同处一间办公室，互相知道对方做了什么是常态；
@@ -1072,6 +1092,14 @@ export const server = createServer(async (req, res) => {
           target: auditTarget(hit, out),
           ok: true, status: 200, ms: Date.now() - started,
           summary: out?._audit || '',
+        });
+      }
+      /* 二进制直出（发货截图原图）。放在这里而不是各自 res.end ——
+         路由统一返回对象、由这一层落到响应，是这套代码的既有约定。 */
+      if (out && out._raw) {
+        return send(res, 200, out._raw, {
+          'Content-Type': out._mime || 'application/octet-stream',
+          'Cache-Control': 'private, max-age=86400',
         });
       }
       // 处理器想种/清 cookie 时通过 _setCookie 传出来，不直接碰 res

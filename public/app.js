@@ -1110,6 +1110,48 @@ async function submitVideo(submit) {
 
 /* ================================================================ 发货截图批量回填 */
 
+/**
+ * 发货截图缩略图。点一下全屏看原图。
+ *
+ * 快递单号在截图里往往很小，缩略图上根本认不出 —— 不能放大的预览
+ * 等于没有预览。原图走接口而不是静态目录：静态目录意味着
+ * 同网段谁都能按 id 猜着看。
+ */
+function shotImg(shotId) {
+  const wrap = el('div');
+  const img = el('img', 'shot');
+  img.src = `/api/shots/${encodeURIComponent(shotId)}`;
+  img.alt = '发货截图';
+  img.style.cursor = 'zoom-in';
+  img.onclick = () => openShotViewer(shotId);
+  img.onerror = () => {
+    /* 已被清理时给一句人话。空白的破图框会让人以为系统坏了。 */
+    wrap.innerHTML = '<div class="src">（原图已清理 —— 只保留最近 1000 张）</div>';
+  };
+  wrap.append(img);
+  return wrap;
+}
+
+function openShotViewer(shotId) {
+  const m = el('div', 'modal');
+  m.innerHTML = `<div class="box" style="max-width:min(94vw,1100px);padding:12px">
+    <img src="/api/shots/${encodeURIComponent(shotId)}" alt="发货截图"
+      style="width:100%;height:auto;max-height:80vh;object-fit:contain;border-radius:6px">
+    <div class="acts" style="margin-top:10px">
+      <a class="btn" href="/api/shots/${encodeURIComponent(shotId)}" target="_blank"
+        rel="noreferrer" style="text-decoration:none">在新标签打开</a>
+      <button class="btn primary" id="svClose">关闭</button>
+    </div>
+  </div>`;
+  document.body.append(m);
+  const close = () => m.remove();
+  m.onclick = (e) => { if (e.target === m) close(); };
+  m.querySelector('#svClose').onclick = close;
+  /* Esc 关闭 —— 全屏看图时鼠标多半在图上，找关闭按钮要移半屏 */
+  const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+  document.addEventListener('keydown', onKey);
+}
+
 async function openShipment(id) {
   const { job } = await api('GET', '/api/jobs/' + id);
   if (!job.result?.matched) return;
@@ -1117,7 +1159,7 @@ async function openShipment(id) {
   SB = {
     jobId: id,
     matched: job.result.matched,
-    image: job.result.imagePreview || null,
+    shotId: job.shotId || null,
     candidates: collaborations.filter((c) => ['待寄样', '已寄样'].includes(c.status)),
     picks: new Map(), checked: new Set(),
   };
@@ -1150,9 +1192,14 @@ async function openShipment(id) {
   });
   $('#drHead').insertBefore(all, $('#drHead').lastChild);
 
-  $('#drRight').innerHTML = '<div class="rh">截图原件</div>';
-  if (SB.image) { const img = el('img', 'shot'); img.src = SB.image; $('#drRight').append(img); }
-  else $('#drRight').append(el('div', 'src', '（识别完成后截图已从库里清掉，避免数据文件膨胀）'));
+  $('#drRight').innerHTML = '<div class="rh">截图原件 · 点击放大</div>';
+  if (SB.shotId) {
+    /* 核对的全部意义就在这张图上：识别出来的单号和图里对不对得上，
+       只有并排看才知道。之前识别完就把图丢了，这一栏永远是空的。 */
+    $('#drRight').append(shotImg(SB.shotId));
+  } else {
+    $('#drRight').append(el('div', 'src', '（这张截图没有存档 —— 存档功能上线之前的任务）'));
+  }
   $('#drRight').append(el('div', 'alert info',
     '<b>不猜打码内容</b>手机号和门牌在截图里是打码的。两名候选分差过小就标「分不出」交给人判断。'));
 
@@ -1412,8 +1459,17 @@ async function openCollaboration(id) {
     c2.append(cpRow('地址', cb.recipient?.address));
     if (cb.recipient?.deliveryNote) c2.append(cpRow('配送备注', cb.recipient.deliveryNote));
 
-    cb.packages.forEach((p) => c2.append(
-      cpRow('快递', `${p.carrier || ''} ${p.trackingNo}`.trim(), { mono: true })));
+    cb.packages.forEach((p) => {
+      c2.append(cpRow('快递', `${p.carrier || ''} ${p.trackingNo}`.trim(), { mono: true }));
+      /* 截图识别来的单号附一个原图入口 —— 「这个单号哪来的」
+         是回填之后最常被问到的问题。手工填的没有图，也就不放这个入口。 */
+      if (p.shotId) {
+        const link = el('div', 'cp');
+        link.innerHTML = '<span></span><span class="dim" style="font-size:12px">识别自发货截图 · 点击查看原图</span><span class="hintcp"></span>';
+        link.onclick = () => openShotViewer(p.shotId);
+        c2.append(link);
+      }
+    });
 
     const ops = el('div', 'ops');
     if (!cb.packages.length) {

@@ -567,3 +567,45 @@ describe('详情的四项精简', () => {
     assert.match(f, /人工修改/);
   });
 });
+
+/* ================================================================ */
+
+describe('发货截图预览', () => {
+  test('确认页显示原图，不再是一句「已清掉」', () => {
+    /* 核对的全部意义就在这张图上：识别出来的单号和图里对不对得上，
+       只有并排看才知道。之前识别完就把图丢了，这一栏永远是空的。 */
+    const f = fn('openShipment');
+    assert.match(f, /shotImg\(SB\.shotId\)/);
+    assert.ok(!/已从库里清掉/.test(f), '还在显示那句占位文案');
+  });
+
+  test('缩略图可点开放大 —— 不能放大的预览等于没有预览', () => {
+    // 快递单号在截图里往往很小，缩略图上根本认不出
+    assert.match(fn('shotImg'), /openShotViewer\(shotId\)/);
+    assert.match(fn('openShotViewer'), /max-height:80vh/);
+  });
+
+  test('原图走接口，不放静态目录', () => {
+    /* 放静态目录等于同网段谁都能按 id 猜着看。 */
+    assert.match(fn('shotImg'), /\/api\/shots\/\$\{encodeURIComponent\(shotId\)\}/);
+    const html2 = html;
+    assert.ok(!/src="\/shots\//.test(html2) && !/src="\/data\//.test(app),
+      '有地方直接引静态路径');
+  });
+
+  test('图被清理时给一句人话，不留破图框', () => {
+    assert.match(fn('shotImg'), /img\.onerror/);
+    assert.match(fn('shotImg'), /原图已清理/);
+  });
+
+  test('合作详情里，截图来的包裹能点开原图；手填的不给这个入口', () => {
+    const f = fn('openCollaboration');
+    assert.match(f, /if \(p\.shotId\)/, '没有按来源区分');
+    assert.match(f, /openShotViewer\(p\.shotId\)/);
+  });
+
+  test('Esc 能关掉看图弹窗', () => {
+    // 全屏看图时鼠标多半在图上，找关闭按钮要移半屏
+    assert.match(fn('openShotViewer'), /Escape/);
+  });
+});

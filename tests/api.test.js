@@ -308,3 +308,30 @@ describe('写操作自动留痕', () => {
     assert.equal((await api('GET', '/api/logs/errors', null, '')).status, 401);
   });
 });
+
+/* ================================================================ */
+
+describe('发货截图原图接口', () => {
+  test('未登录拿不到原图', async () => {
+    /* 原图里有达人的收件地址和手机号（哪怕打了码），
+       放静态目录或者不拦登录，等于同网段谁都能按 id 猜着看。
+
+       拦住它的是全局守卫（/api/shots 不在 OPEN_ROUTES 里），
+       路由里那句 requireUser 是第二层 —— 变异验证过：单独去掉它这条仍然绿。
+       两层都留着，是防将来有人把这条路由加进 OPEN_ROUTES。 */
+    assert.equal((await api('GET', '/api/shots/sh-abc-1234', null, '')).status, 401);
+  });
+
+  test('不存在的返回 404 而不是 500', async () => {
+    assert.equal((await api('GET', '/api/shots/sh-abc-1234')).status, 404);
+  });
+
+  test('路径穿越被挡住', async () => {
+    /* id 会被拼进文件路径。这一层和 shots.read 的白名单是两道，
+       任一道失守都不行。 */
+    for (const evil of ['..%2F..%2Fsettings', '%2Fetc%2Fpasswd', 'sh-a-b%2F..%2F..%2Fnaimeng.db']) {
+      const r = await api('GET', `/api/shots/${evil}`);
+      assert.ok(r.status === 404 || r.status === 400, `${evil} 返回了 ${r.status}`);
+    }
+  });
+});
