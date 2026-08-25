@@ -842,6 +842,22 @@ const routes = {
     return { collaboration: cb };
   },
 
+  /* 删合作。**不可逆**，所以只有归属商务能做 ——
+     和其他按 id 直取的接口用同一条规则，不另起一套。 */
+  'DELETE /api/collaborations/:id': async (req, p) => {
+    const cb = await db.getCollaboration(p.id);
+    if (!cb) throw httpError(404, '合作不存在');
+    await ownerOr403(cb, req, '合作');
+    const me = await requireUser(req);
+    const ok = await db.deleteCollaboration(p.id);
+    if (!ok) throw httpError(404, '合作不存在');
+    /* 留痕：不可逆的操作要能事后追问「这条是谁删的」。
+       日志文件是唯一还在的地方 —— 记录本身已经没了。 */
+    console.log(`[删除] ${me.name}(${me.id}) 删除合作 ${p.id}`
+      + ` 达人=${cb.creatorName} 产品=${(cb.items || []).length} 包裹=${(cb.packages || []).length}`);
+    return { ok: true, deleted: p.id };
+  },
+
   'POST /api/collaborations/:id/status': async (req, p) => {
     await ownerOr403(await db.getCollaboration(p.id), req, '合作');
     const b = await readBody(req);

@@ -339,7 +339,10 @@ describe('不寄样合作的录入界面', () => {
 
   test('记录表能筛「进行中」，且它和已完成不是一个颜色', () => {
     assert.match(html, /data-status="进行中"/);
-    assert.match(fn('loadRecords'), /进行中[\s\S]{0,20}running/);
+    // 状态胶囊已抽成 statusPill，不再内联在 loadRecords 里
+    const f = fn('statusPill');
+    assert.match(f, /进行中[\s\S]{0,20}running/);
+    assert.match(f, /已完成[\s\S]{0,20}done/);
   });
 });
 
@@ -381,5 +384,110 @@ describe('源码里不能有调用不存在的函数', () => {
       .map((m) => m[1]);
     const missing = [...new Set(called)].filter((n) => !defined.has(n));
     assert.deepEqual(missing, [], `这些函数被调用但没有定义：${missing.join('、')}`);
+  });
+});
+
+/* ================================================================ */
+
+describe('合作记录列表：八列', () => {
+  test('表头就是约定的那八列，顺序也对', () => {
+    const head = fn('loadRecords').match(/<thead>[\s\S]*?<\/thead>/)[0];
+    const cols = [...head.matchAll(/<th[^>]*>([^<]+)<\/th>/g)].map((m) => m[1].trim());
+    assert.deepEqual(cols,
+      ['达人 / 账号', '状态', '寄样', '快递', '视频', '飞书同步', '建档', '更新']);
+  });
+
+  test('多账号一行一个，不是「、」拼在一格里', () => {
+    /* 矩阵号一多，拼在一格里就看不清哪个昵称对应哪个抖音号。 */
+    const f = fn('loadRecords');
+    assert.match(f, /fulfillments\.map\([\s\S]{0,300}<div>/);
+    assert.ok(!/fulfillments[\s\S]{0,120}join\('、'\)/.test(f), '账号还在用「、」拼接');
+  });
+
+  test('「快递状态」只说有没有发货，不编造物流轨迹', () => {
+    /* 系统里没有物流数据源 —— 快递公司和单号都是人填的，到哪了没人知道。
+       写「运输中」「已签收」就是在编，而且没人能发现它是编的。 */
+    const f = fn('shipmentCell');
+    assert.match(f, /待发货/);
+    assert.match(f, /已发货/);
+    for (const fake of ['运输中', '已签收', '派送中', '已揽收']) {
+      assert.ok(!f.includes(fake), `编造了物流状态「${fake}」，系统根本不知道`);
+    }
+  });
+
+  test('视频发布进度按「要出片的账号」算分母', () => {
+    /* 标了「本次不出片」的号算进分母，这条就永远凑不齐，
+       看起来像一直没做完。 */
+    assert.match(fn('videoCell'), /filter\(\(f\) => f\.expectVideo\)/);
+  });
+});
+
+/* ================================================================ */
+
+describe('合作详情：五张卡片', () => {
+  test('五张卡片都在，顺序按信息的使用顺序', () => {
+    const f = fn('openCollaboration');
+    const cards = [...f.matchAll(/dcard\(\s*[`'"]([^`'"]*?)(?:\s*·|[`'"])/g)].map((m) => m[1].trim());
+    assert.deepEqual(cards.slice(0, 5),
+      ['达人档案', '寄样信息', '视频信息', '商务信息', '系统信息']);
+  });
+
+  test('标题给出建档日期 + 达人 + 状态', () => {
+    /* 同一个达人可能有很多次合作，日期是唯一能一眼分开它们的东西。 */
+    const f = fn('openCollaboration');
+    assert.match(f, /title:\s*`\$\{fmtDate\(cb\.createdAt\)\}[\s\S]{0,60}creatorName/);
+    assert.match(f, /tags:\s*\[\{\s*text:\s*cb\.status/);
+  });
+
+  test('底部只放终止和删除，日常操作在各自卡片里', () => {
+    /* 底部混进日常操作，「这一排都是危险动作」这条规律就失效了。 */
+    const f = fn('openCollaboration');
+    const footBlock = f.match(/const foot = \[\][\s\S]*?foot\.push\(del\);/)[0];
+    assert.match(footBlock, /终止合作/);
+    assert.match(footBlock, /删除合作/);
+    for (const daily of ['回填快递', '复制', '记录回访', '查看达人']) {
+      assert.ok(!footBlock.includes(daily), `日常操作「${daily}」跑到底部去了`);
+    }
+  });
+
+  test('删除要两道确认，第二道得手打达人名字', () => {
+    /* 不可逆的操作不该只隔着一次「确定」—— 那个按钮人是会顺手点的。 */
+    const f = fn('openCollaboration');
+    assert.match(f, /confirm\([\s\S]{0,200}不可恢复/);
+    assert.match(f, /prompt\([\s\S]{0,80}输入达人名称/);
+    assert.match(f, /typed\.trim\(\) !== name/);
+  });
+
+  test('非归属人的删除按钮是禁用的，不是藏起来', () => {
+    // 藏起来会让人以为「没有这个功能」，禁用+提示才说得清为什么不能点
+    const f = fn('openCollaboration');
+    assert.match(f, /del\.disabled = !mine/);
+    assert.match(f, /只有归属商务能删/);
+  });
+
+  test('每条信息可点击复制，口令复制的是原文不是截断版', () => {
+    /* 口令逐字节保存是硬要求 —— 抖音跳转和千川加载都依赖它。
+       显示可以截断，复制绝不能。 */
+    assert.match(fn('cpRow'), /copy\(copyAs \|\| v\)/);
+    assert.match(fn('openCollaboration'), /copyAs: f\.shareToken/);
+  });
+
+  test('有无快递单号时给的是不同的操作', () => {
+    // 同一个位置只放当前这一步真正要做的事
+    const f = fn('openCollaboration');
+    assert.match(f, /!cb\.packages\.length[\s\S]{0,200}回填快递单号/);
+    assert.match(f, /复制完整物流信息/);
+  });
+
+  test('没视频链接时能填，有链接时能复制整段', () => {
+    const f = fn('openCollaboration');
+    assert.match(f, /填写视频链接/);
+    assert.match(f, /复制完整视频信息/);
+    assert.match(f, /\/api\/fulfillments\/\$\{f\.id\}`, \{ videoUrl/);
+  });
+
+  test('转交走达人，并说清会连带转走名下所有合作', () => {
+    assert.match(fn('openCollaboration'), /openTransferModal\(cb\.creatorId/);
+    assert.match(fn('openTransferModal'), /名下的所有合作会一起转/);
   });
 });

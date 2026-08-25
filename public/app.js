@@ -1285,127 +1285,293 @@ function timeline(cb) {
   return wrap;
 }
 
+/* ---------------- 合作详情：五张卡片 ---------------- */
+
+/** 一行可点击复制的信息。整行都是热区 —— 手机号和长地址用鼠标划选很容易划错。 */
+function cpRow(label, value, { copyAs = null, mono = false } = {}) {
+  const v = String(value ?? '').trim();
+  const row = el('div', 'cp');
+  row.innerHTML = `<span>${esc(label)}</span>`
+    + `<span${mono ? ' class="mono"' : ''}>${v ? esc(v) : '<span class="dim">—</span>'}</span>`
+    + `<span class="hintcp">${v ? '点击复制' : ''}</span>`;
+  if (!v) { row.style.cursor = 'default'; row.onmouseenter = null; return row; }
+  row.onclick = async () => toast(await copy(copyAs || v) ? `已复制${label}` : '复制失败');
+  return row;
+}
+
+function dcard(title, extraHead = null) {
+  const c = el('div', 'dcard');
+  const h = el('h4');
+  h.append(el('span', null, esc(title)), el('span', 'grow'));
+  if (extraHead) h.append(extraHead);
+  c.append(h);
+  return c;
+}
+
 async function openCollaboration(id) {
   const { collaboration: cb, notifyText } = await api('GET', '/api/collaborations/' + id);
+  const mine = CFG?.me?.id && cb.ownerUserId === CFG.me.id;
 
+  /* ── 底部：只放不可逆或改变生命周期的操作 ────────────────────
+     日常操作（回填快递、复制、催拍）放在各自的卡片里 ——
+     它们属于某一块信息，混进底部会让「这一排都是危险动作」这条规律失效。 */
   const foot = [];
   if (cb.status !== '已终止') {
-    const stop = el('button', 'btn danger', '终止合作');
+    const stop = el('button', 'btn', '终止合作');
     stop.onclick = async () => {
       if (!confirm('终止后不再产生待办，历史记录保留。确定？')) return;
       await api('POST', `/api/collaborations/${cb.id}/status`, { status: '已终止' });
-      closeDrawer(); toast('已终止'); loadRecords();
+      closeDrawer(); toast('已终止'); loadDesk(); loadRecords();
     };
     foot.push(stop);
   }
+  foot.push(el('span', 'grow'));
+  const del = el('button', 'btn danger', '删除合作');
+  del.title = mine ? '' : '只有归属商务能删';
+  del.disabled = !mine;
+  del.onclick = async () => {
+    /* 两道确认。第一道说清后果，第二道要求手打达人名字 ——
+       不可逆的操作不该只隔着一次「确定」，那个按钮人是会顺手点的。 */
+    const name = cb.creatorName || '未命名达人';
+    if (!confirm(`删除这条合作，连同它的产品行、履约项、快递记录，以及飞书里对应的行。\n\n`
+      + `达人档案和录入日志保留。\n\n此操作不可恢复。继续？`)) return;
+    const typed = prompt(`确认删除请输入达人名称：${name}`);
+    if (typed === null) return;
+    if (typed.trim() !== name) { toast('名称不匹配，已取消'); return; }
+    try {
+      await api('DELETE', `/api/collaborations/${cb.id}`);
+      closeDrawer(); toast('已删除'); loadDesk(); loadRecords();
+    } catch (e) { toast(e.message); }
+  };
+  foot.push(del);
 
   openDrawer({
-    title: cb.creatorName || '未命名达人',
-    tags: [{ text: cb.status, cls: cb.status === '已完成' ? 'done' : 'queued' }],
+    /* 标题给三样东西：什么时候建的、是谁、到哪一步了。
+       在一堆同名达人的多次合作里，日期是唯一能分开它们的东西。 */
+    title: `${fmtDate(cb.createdAt)} · ${cb.creatorName || '未命名达人'}`,
+    tags: [{ text: cb.status, cls: cb.status === '已完成' ? 'done'
+      : cb.status === '进行中' ? 'running' : cb.status === '已终止' ? 'failed' : 'queued' }],
+    right: false,
     foot,
     onClose: () => { loadDesk(); loadRecords(); },
   });
 
   const L = $('#drLeft');
-  L.append(el('div', 'rh', '进展'));
-  L.append(timeline(cb));
 
-  const ops = el('div'); ops.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px';
-  const tk = el('button', 'btn sm', '回填快递');
-  tk.onclick = () => openTrackingModal(cb.id);
-  const cp = el('button', 'btn sm', '复制物流信息');
-  cp.onclick = async () => toast(await copy(notifyText) ? '已复制' : '复制失败');
-  const nt = el('button', 'btn sm', cb.notifiedAt ? '取消已告知' : '标记已告知');
-  nt.onclick = async () => {
-    await api('POST', `/api/collaborations/${cb.id}/notified`, { value: !cb.notifiedAt });
-    closeDrawer(); toast('已更新'); loadDesk(); loadRecords();
-  };
-  const fu = el('button', 'btn sm', '记录回访');
-  fu.onclick = () => openFollowUpModal(cb.id);
-  const cr = el('button', 'btn sm', '查看达人');
-  cr.onclick = () => openCreator(cb.creatorId);
-  ops.append(tk, cp, nt, fu, cr);
-  L.append(ops);
-
-  L.append(el('div', 'rh', `履约项 · 每个账号一条，共 ${cb.fulfillments.length} 个`));
+  /* ── 1. 达人档案 ─────────────────────────────────────────── */
+  const viewCreator = el('button', 'btn sm', '查看达人');
+  viewCreator.onclick = () => openCreator(cb.creatorId);
+  const c1 = dcard(`达人档案 · ${cb.fulfillments.length} 个账号`, viewCreator);
+  if (!cb.fulfillments.length) {
+    c1.append(el('div', 'empty-note', '这条合作没有绑定任何抖音账号'));
+  }
   cb.fulfillments.forEach((f) => {
-    const m = el('div', 'mcard'); m.style.gridTemplateColumns = '1fr'; m.style.cursor = 'default';
-    const body = el('div');
-    const hd = el('div', 'hd');
-    hd.append(el('b', null, esc(f.account?.nickname || '（无昵称）')));
-    hd.append(el('span', 'st ' + (f.shareToken ? 'done' : 'queued'), esc(f.filmingProgress)));
-    body.append(hd);
-    body.append(el('div', 'sub',
-      `抖音号 ${esc(f.account?.douyinId || '—')} · UID ${esc(f.account?.uid || '—')} · 合作码 ${esc(f.account?.cooperationCode || '—')}`));
-    if (f.shareToken) {
-      const row = el('div'); row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
-      const c2 = el('button', 'btn sm', '复制口令');
-      c2.onclick = async () => toast(await copy(f.shareToken) ? '已复制完整口令，可直接发给运营或粘进千川' : '复制失败');
-      row.append(c2);
-      if (f.videoUrl) {
-        const a = el('a', 'btn sm', '打开视频 ↗');
-        a.href = f.videoUrl; a.target = '_blank'; a.rel = 'noreferrer'; a.style.textDecoration = 'none';
-        row.append(a);
-      }
-      body.append(row);
-    }
-    m.append(body); L.append(m);
+    const a = f.account || {};
+    const box = el('div', 'acct');
+    box.append(el('div', 'an', esc(a.nickname || '（无昵称）')));
+    box.append(cpRow('抖音号', a.douyinId, { mono: true }));
+    box.append(cpRow('UID', a.uid, { mono: true }));
+    box.append(cpRow('合作码', a.cooperationCode, { mono: true }));
+    c1.append(box);
   });
+  L.append(c1);
 
-  const R = $('#drRight');
-  R.innerHTML = '<div class="rh">这次合作</div>';
-  const g = el('div', 'fgrid'); g.style.gridTemplateColumns = '1fr';
-  const box = (k, v) => {
-    const f = el('div', 'f');
-    f.innerHTML = `<label>${esc(k)}</label><div class="src" style="font-family:inherit;font-size:12.8px">${v}</div>`;
-    g.append(f);
-  };
-  box('寄样产品', cb.items.length
-    ? cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('、')
-    : '<span class="dim">还没填产品，仓库无法备货</span>');
-  box('寄样费用', cb.sampleCost != null ? '¥' + cb.sampleCost : '<span class="dim">未填</span>');
-  box('收件', `${esc(cb.recipient?.name || '—')} ${esc(cb.recipient?.phone || '')}
-    <div class="dim">${esc(cb.recipient?.address || '')}</div>
-    ${cb.recipient?.deliveryNote ? `<div class="dim">配送备注：${esc(cb.recipient.deliveryNote)}</div>` : ''}`);
-  box('快递', cb.packages.length
-    ? cb.packages.map((p) => `${esc(p.carrier)} ${esc(p.trackingNo)}`).join('<br>')
-    : '<span class="dim">尚未回填</span>');
-  box('归属', esc(cb.ownerName));
-  box('建档', fmtTime(cb.createdAt));
-  R.append(g);
+  /* ── 2. 寄样信息 ─────────────────────────────────────────── */
+  const c2 = dcard('寄样信息');
+  if (!uiNeedsSample(cb.type)) {
+    c2.append(el('div', 'empty-note', `${cb.type} —— 不寄实物，无需产品和收件信息`));
+  } else {
+    c2.append(cpRow('产品', cb.items.length
+      ? cb.items.map((i) => `${i.productName} ×${i.quantity}`).join('、') : ''));
+    c2.append(cpRow('寄样费用', cb.sampleCost != null ? '¥' + cb.sampleCost : ''));
+    c2.append(cpRow('收件人', cb.recipient?.name));
+    c2.append(cpRow('电话', cb.recipient?.phone, { mono: true }));
+    c2.append(cpRow('地址', cb.recipient?.address));
+    if (cb.recipient?.deliveryNote) c2.append(cpRow('配送备注', cb.recipient.deliveryNote));
 
-  /* 飞书同步：状态 + 手动重推。
-     放在详情里而不是只放表格那一列，是因为失败原因往往很长
-     （权限、列名、类型各有各的说法），表格的 title 挂不住。 */
+    cb.packages.forEach((p) => c2.append(
+      cpRow('快递', `${p.carrier || ''} ${p.trackingNo}`.trim(), { mono: true })));
+
+    const ops = el('div', 'ops');
+    if (!cb.packages.length) {
+      /* 没单号时给回填；有单号时给复制整段物流信息 ——
+         同一个位置只放当前这一步真正要做的事。 */
+      const tk = el('button', 'btn sm primary', '回填快递单号');
+      tk.onclick = () => openTrackingModal(cb.id);
+      ops.append(tk);
+    } else {
+      const cpAll = el('button', 'btn sm', '复制完整物流信息');
+      cpAll.onclick = async () => toast(await copy(notifyText) ? '已复制，可直接发给达人' : '复制失败');
+      const more = el('button', 'btn sm', '再加一个快递单号');
+      more.onclick = () => openTrackingModal(cb.id);
+      ops.append(cpAll, more);
+    }
+    const nt = el('button', 'btn sm', cb.notifiedAt ? '取消已告知' : '标记已告知达人');
+    nt.onclick = async () => {
+      await api('POST', `/api/collaborations/${cb.id}/notified`, { value: !cb.notifiedAt });
+      toast('已更新'); await openCollaboration(cb.id); loadDesk(); loadRecords();
+    };
+    ops.append(nt);
+    c2.append(ops);
+  }
+  L.append(c2);
+
+  /* ── 3. 视频信息 ─────────────────────────────────────────── */
+  const c3 = dcard('视频信息');
+  const wantVideo = cb.fulfillments.filter((f) => f.expectVideo);
+  if (!wantVideo.length) {
+    c3.append(el('div', 'empty-note', '这条合作不要求出片'));
+  }
+  wantVideo.forEach((f) => {
+    const a = f.account || {};
+    const box = el('div', 'acct');
+    const hd = el('div', 'an');
+    hd.innerHTML = `${esc(a.nickname || a.douyinId || '（无昵称）')} `
+      + `<span class="st ${f.filmingProgress === '已发布' ? 'done' : 'queued'}" `
+      + `style="margin-left:6px">${esc(f.filmingProgress)}</span>`;
+    box.append(hd);
+
+    if (f.videoUrl || f.shareToken) {
+      if (f.videoUrl) box.append(cpRow('链接', f.videoUrl, { mono: true }));
+      /* 口令必须逐字节复制 —— 抖音跳转和千川加载都依赖它，改一个字符就可能失效。
+         所以这里复制的是原文，不是显示用的截断版。 */
+      if (f.shareToken) box.append(cpRow('口令', f.shareToken.slice(0, 40) + (f.shareToken.length > 40 ? '…' : ''),
+        { copyAs: f.shareToken, mono: true }));
+      const ops = el('div', 'ops');
+      const cpAll = el('button', 'btn sm', '复制完整视频信息');
+      cpAll.onclick = async () => {
+        const text = [`达人：${a.nickname || a.douyinId || ''}`,
+          f.videoUrl ? `链接：${f.videoUrl}` : '',
+          f.shareToken ? `口令：${f.shareToken}` : ''].filter(Boolean).join('\n');
+        toast(await copy(text) ? '已复制' : '复制失败');
+      };
+      ops.append(cpAll);
+      if (f.videoUrl) {
+        const a2 = el('a', 'btn sm', '打开视频 ↗');
+        a2.href = f.videoUrl; a2.target = '_blank'; a2.rel = 'noreferrer'; a2.style.textDecoration = 'none';
+        ops.append(a2);
+      }
+      box.append(ops);
+    } else {
+      const ops = el('div', 'ops');
+      const add = el('button', 'btn sm primary', '填写视频链接');
+      add.onclick = async () => {
+        const url = prompt(`${a.nickname || a.douyinId || '这个账号'} 的视频链接`);
+        if (url === null) return;
+        if (!/^https?:\/\//.test(url.trim())) { toast('请填一个 http 开头的链接'); return; }
+        try {
+          await api('POST', `/api/fulfillments/${f.id}`, { videoUrl: url.trim() });
+          toast('已保存'); await openCollaboration(cb.id); loadDesk(); loadRecords();
+        } catch (e) { toast(e.message); }
+      };
+      const fu = el('button', 'btn sm', '记录回访');
+      fu.onclick = () => openFollowUpModal(cb.id);
+      ops.append(add, fu);
+      box.append(ops);
+    }
+    c3.append(box);
+  });
+  L.append(c3);
+
+  /* ── 4. 商务信息 ─────────────────────────────────────────── */
+  const c4 = dcard('商务信息');
+  c4.append(cpRow('归属商务', cb.ownerName));
+  c4.append(cpRow('合作类型', cb.type));
+  if (cb.salesChannel) c4.append(cpRow('带货方式', cb.salesChannel));
+  const ops4 = el('div', 'ops');
+  const tr = el('button', 'btn sm', '转交归属');
+  /* 转交挂在达人上，不在合作上 —— 合作跟着达人走，
+     单独转一条合作会让「这个达人归谁」出现两个答案。 */
+  tr.onclick = () => openTransferModal(cb.creatorId, cb.creatorName);
+  ops4.append(tr);
+  c4.append(ops4);
+  L.append(c4);
+
+  /* ── 5. 系统信息 ─────────────────────────────────────────── */
+  const c5 = dcard('系统信息');
+  c5.append(cpRow('合作ID', cb.id, { mono: true }));
+  c5.append(cpRow('建档', fmtTime(cb.createdAt)));
+  c5.append(cpRow('最后更新', fmtTime(cb.updatedAt)));
+  if (cb.notifiedAt) c5.append(cpRow('告知达人', fmtTime(cb.notifiedAt)));
+
   const st = (RECORDS_SYNC || {})[cb.id];
+  const line = el('div', 'cp'); line.style.cursor = 'default';
+  line.innerHTML = `<span>飞书同步</span><span>${syncPill(st)}`
+    + (st?.state === 'synced' && st.at ? ` <span class="dim">${fmtTime(st.at)} · ${st.rows} 行</span>` : '')
+    + '</span><span class="hintcp"></span>';
+  c5.append(line);
+  if (st?.error) {
+    /* 失败原因原样显示。「同步失败」四个字对排查毫无帮助 ——
+       用户需要知道是权限、列名还是类型的问题。 */
+    const errBox = el('div', 'dim', esc(st.error));
+    errBox.style.cssText = 'white-space:pre-wrap;font-size:12px;padding:4px 0 0';
+    c5.append(errBox);
+  }
   if (st && st.state !== 'off') {
-    R.append(el('div', 'rh', '飞书同步'));
-    const fs = el('div', 'f');
-    fs.innerHTML = `<div class="src" style="font-family:inherit;font-size:12.8px">${syncPill(st)}`
-      + (st.state === 'synced' && st.at ? `<span class="dim"> · ${fmtTime(st.at)} · ${st.rows} 行</span>` : '')
-      + (st.error ? `<div class="dim" style="margin-top:6px;white-space:pre-wrap">${esc(st.error)}</div>` : '')
-      + '</div>';
-    const btn = el('button', 'btn sm', st.state === 'synced' ? '重新同步' : '立即同步');
-    btn.style.marginTop = '8px';
-    btn.onclick = async () => {
-      btn.disabled = true; btn.textContent = '同步中…';
+    const ops5 = el('div', 'ops');
+    const sbtn = el('button', 'btn sm', st.state === 'synced' ? '重新同步' : '立即同步');
+    sbtn.onclick = async () => {
+      sbtn.disabled = true; sbtn.textContent = '同步中…';
       try {
         await api('POST', '/api/feishu/sync-one', { collaborationId: cb.id });
         toast('已同步到飞书');
-        await loadRecords();          // 刷新那一列
+        await loadRecords();
         await openCollaboration(cb.id);
       } catch (e) {
-        /* 失败原因原样显示。「同步失败」四个字对排查毫无帮助。 */
-        btn.disabled = false; btn.textContent = '重试';
-        fs.append(el('div', 'alert warn', `<b>同步失败</b>${esc(e.message)}`));
+        sbtn.disabled = false; sbtn.textContent = '重试';
+        c5.append(el('div', 'alert warn', `<b>同步失败</b>${esc(e.message)}`));
       }
     };
-    fs.append(btn);
-    R.append(fs);
+    ops5.append(sbtn);
+    c5.append(ops5);
   }
+  L.append(c5);
+
+  /* 时间线放最后 —— 它是「发生过什么」的补充，不是要操作的东西 */
+  const c6 = dcard('进展时间线');
+  c6.append(timeline(cb));
+  L.append(c6);
 }
 
 /* ---------- 回填快递 ---------- */
+
+/* ---------- 归属转交 ---------- */
+
+/**
+ * 转交挂在**达人**上，不在合作上。
+ *
+ * 合作跟着达人走（transferOwner 会把这个达人名下的合作一起转），
+ * 所以「转一条合作」这个动作本身不成立 —— 真做了会让
+ * 「这个达人归谁」出现两个互相矛盾的答案。
+ */
+function openTransferModal(creatorId, creatorName) {
+  const m = el('div', 'modal');
+  m.innerHTML = `<div class="box">
+    <h3>转交归属</h3>
+    <p class="sub">归属人是责任人，待办发给他。<b>「${esc(creatorName || '这个达人')}」名下的所有合作会一起转过去</b>，
+      不是只转当前这一条。谁转的、为什么转都会留痕。</p>
+    <div class="frow"><label>转交给</label><select id="trTo"></select></div>
+    <div class="frow"><label>原因</label><input id="trWhy" placeholder="如：人员调整" value="人员调整"></div>
+    <div class="acts"><button class="btn" id="trCancel">取消</button><button class="btn primary" id="trGo">转交</button></div>
+  </div>`;
+  document.body.append(m);
+  const close = () => m.remove();
+  m.onclick = (e) => { if (e.target === m) close(); };
+  m.querySelector('#trCancel').onclick = close;
+
+  const sel = m.querySelector('#trTo');
+  (CFG.users || []).forEach((u) => {
+    const o = el('option', null, u.name); o.value = u.id; sel.append(o);
+  });
+
+  m.querySelector('#trGo').onclick = async () => {
+    try {
+      await api('POST', `/api/creators/${creatorId}/transfer`,
+        { toUserId: sel.value, reason: m.querySelector('#trWhy').value.trim() });
+      close(); closeDrawer(); toast('已转交'); loadDesk(); loadRecords();
+    } catch (e) { toast(e.message); }
+  };
+}
 
 function openTrackingModal(collaborationId) {
   const m = el('div', 'modal');
@@ -1591,6 +1757,51 @@ function syncPill(st) {
   return `<span class="st ${d.cls}" title="${esc(tip)}">${d.text}</span>`;
 }
 
+/**
+ * 合作状态胶囊。颜色只用 index.html 里真实存在的 .st 变体。
+ */
+function statusPill(status) {
+  const cls = status === '已完成' ? 'done'
+    : status === '进行中' ? 'running'
+    : status === '已终止' ? 'failed'
+    : 'queued';
+  return `<span class="st ${cls}">${esc(status)}</span>`;
+}
+
+/**
+ * 快递格：单号 + 发货状态。
+ *
+ * **「发货状态」是从有没有单号推出来的，不是真实物流轨迹。**
+ * 系统里没有物流数据源 —— 快递公司和单号是人填的，到哪了没人知道。
+ * 所以只说「已发货 / 待发货」这种我们确实知道的事，
+ * 不去编一个「运输中」「已签收」出来。真要轨迹得接快递查询 API。
+ */
+function shipmentCell(cb) {
+  if (!uiNeedsSample(cb.type)) return '<span class="dim">—</span>';
+  if (!cb.packages.length) {
+    return `<span class="st queued">待发货</span>`;
+  }
+  const lines = cb.packages
+    .map((p) => `<div class="mono">${esc(p.carrier || '')} ${esc(p.trackingNo)}</div>`).join('');
+  return `<span class="st done">已发货</span>${lines}`;
+}
+
+/**
+ * 视频格：几个号发布了 / 一共几个要出片。
+ *
+ * 按「要出片的账号」算分母，不按全部账号 —— 标了「本次不出片」的号
+ * 算进分母的话，这条永远凑不齐，看起来像一直没做完。
+ */
+function videoCell(cb) {
+  const want = cb.fulfillments.filter((f) => f.expectVideo);
+  if (!want.length) return '<span class="dim">不出片</span>';
+  const done = want.filter((f) => f.filmingProgress === '已发布').length;
+  const cls = done === want.length ? 'done' : done ? 'running' : 'queued';
+  const label = done === want.length ? '已发布' : done ? '部分发布' : '未发布';
+  return `<span class="st ${cls}">${label}</span>`
+    + `<div class="dim">${done}/${want.length}</div>`;
+}
+
 async function loadRecords() {
   const q = encodeURIComponent($('#q').value.trim());
   let data, todos = [];
@@ -1615,25 +1826,43 @@ async function loadRecords() {
   const states = data.syncStates || {};
   RECORDS_SYNC = states;
   const t = el('table');
-  t.innerHTML = `<thead><tr><th style="width:20%">达人 / 账号</th><th style="width:12%">状态</th>
-    <th style="width:16%">寄样</th><th style="width:21%">快递</th><th style="width:19%">进展</th>
-    <th style="width:12%">飞书同步</th></tr></thead>`;
+  t.innerHTML = `<thead><tr>
+    <th style="width:17%">达人 / 账号</th>
+    <th style="width:9%">状态</th>
+    <th style="width:15%">寄样</th>
+    <th style="width:18%">快递</th>
+    <th style="width:13%">视频</th>
+    <th style="width:10%">飞书同步</th>
+    <th style="width:9%">建档</th>
+    <th style="width:9%">更新</th></tr></thead>`;
   const tb = el('tbody');
   list.forEach((cb) => {
     const tr = el('tr');
-    const accs = cb.fulfillments.map((f) => esc(f.account?.douyinId || f.account?.nickname || '—')).join('<br>') || '—';
-    const items = cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('<br>') || '<span class="dim">未填</span>';
-    const pkgs = cb.packages.map((p) => `${esc(p.carrier)} ${esc(p.trackingNo)}`).join('<br>') || '<span class="dim">未回填</span>';
-    const published = cb.fulfillments.filter((f) => f.shareToken).length;
-    const prog = [`建档 ${daysAgo(cb.createdAt)}`,
-      cb.notifiedAt ? '已告知' : '',
-      published ? `已出片 ${published}/${cb.fulfillments.length}` : ''].filter(Boolean).join(' · ');
+
+    /* 多账号一行一个。以前是「、」拼在一格里，矩阵号一多就看不清哪个是哪个。 */
+    const accs = cb.fulfillments.length
+      ? cb.fulfillments.map((f) => {
+        const a = f.account || {};
+        return `<div>${esc(a.nickname || a.douyinId || a.uid || '—')}</div>`
+          + (a.douyinId && a.nickname ? `<div class="mono dim">${esc(a.douyinId)}</div>` : '');
+      }).join('')
+      : '<span class="dim">无账号</span>';
+
+    const ship = !uiNeedsSample(cb.type)
+      ? '<span class="dim">不寄样</span>'
+      : cb.items.length
+        ? cb.items.map((i) => `${esc(i.productName)} ×${i.quantity}`).join('<br>')
+        : '<span class="tag miss">未填</span>';
+
     tr.innerHTML = `<td><b>${esc(cb.creatorName || '未命名达人')}</b>
-        <div class="mono dim">${accs}</div></td>
-      <td><span class="st ${cb.status === '已完成' ? 'done' : cb.status === '进行中' ? 'running' : 'queued'}">${esc(cb.status)}</span></td>
-      <td>${items}</td><td class="mono">${pkgs}</td>
-      <td class="dim">${esc(prog)}</td>
-      <td>${syncPill(states[cb.id])}</td>`;
+        <div style="margin-top:2px">${accs}</div></td>
+      <td>${statusPill(cb.status)}</td>
+      <td>${ship}</td>
+      <td>${shipmentCell(cb)}</td>
+      <td>${videoCell(cb)}</td>
+      <td>${syncPill(states[cb.id])}</td>
+      <td class="dim">${esc(fmtDate(cb.createdAt))}</td>
+      <td class="dim">${esc(fmtDate(cb.updatedAt))}</td>`;
     tr.onclick = () => openCollaboration(cb.id);
     tb.append(tr);
   });

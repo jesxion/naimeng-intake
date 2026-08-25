@@ -318,3 +318,37 @@ describe('我的资料只能改自己', () => {
     assert.match(r.error || '', /已经有一位/);
   });
 });
+
+/* ================================================================ */
+
+describe('删除合作的权限', () => {
+  test('别人的合作删不掉', async () => {
+    const a = await loginAs(BASE, { name: '删除甲' });
+    const b = await loginAs(BASE, { name: '删除乙' });
+
+    const made = await api('POST', '/api/collaborations', {
+      action: 'createRecord',
+      form: { name: '归甲的达人', accounts: [{ nickname: '归甲的达人', douyinId: '100000081' }], recipient: {} },
+    }, a.cookie);
+    assert.equal(made.status, 200, JSON.stringify(made));
+    const id = made.collaboration.id;
+
+    const denied = await api('DELETE', `/api/collaborations/${id}`, null, b.cookie);
+    assert.equal(denied.status, 403);
+    assert.ok((await api('GET', `/api/collaborations/${id}`, null, a.cookie)).collaboration,
+      '被拒了却还是删掉了');
+
+    const ok = await api('DELETE', `/api/collaborations/${id}`, null, a.cookie);
+    assert.equal(ok.status, 200);
+    assert.equal((await api('GET', `/api/collaborations/${id}`, null, a.cookie)).status, 404);
+  });
+
+  test('未登录删不掉', async () => {
+    assert.equal((await api('DELETE', '/api/collaborations/cb-00001', null, '')).status, 401);
+  });
+
+  test('删不存在的返回 404 而不是 500', async () => {
+    const a = await loginAs(BASE, { name: '删除甲' });
+    assert.equal((await api('DELETE', '/api/collaborations/cb-99999', null, a.cookie)).status, 404);
+  });
+});

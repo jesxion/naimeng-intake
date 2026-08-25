@@ -532,3 +532,49 @@ describe('每条合作的同步状态', () => {
     assert.equal(sync.statesFor([cb.id], await db.getSettings()).get(cb.id).state, 'synced');
   });
 });
+
+/* ================================================================ */
+
+describe('删除合作', () => {
+  let cb, creatorId;
+
+  test('删掉后飞书里对应的行也没了', async () => {
+    cb = await newCollab('待删除达人', '100000061', '20000000061');
+    creatorId = cb.creatorId;
+    await sync.pump({ force: true });
+    assert.ok([...fake.state.records.values()].some((x) => x['合作ID'] === cb.id), '前提没成立');
+
+    assert.equal(await db.deleteCollaboration(cb.id), true);
+    await sync.pump({ force: true });
+
+    assert.equal([...fake.state.records.values()].filter((x) => x['合作ID'] === cb.id).length, 0,
+      '合作删了，飞书里还留着行');
+  });
+
+  test('产品行、履约项、包裹一起删干净', async () => {
+    for (const t of ['collab_items', 'collab_accounts', 'packages']) {
+      assert.equal(store.findBy(t, 'collaborationId', cb.id).length, 0, `${t} 有残留`);
+    }
+    assert.equal(await db.getCollaboration(cb.id), null);
+  });
+
+  test('本地映射也清掉，不会一直去删已经不存在的记录', async () => {
+    const left = store.all('sync_links').filter((l) => String(l.entityId).startsWith(cb.id + '#'));
+    assert.equal(left.length, 0);
+  });
+
+  test('达人档案保留 —— 他可能还有别的合作', async () => {
+    assert.ok(await db.getCreator(creatorId), '把达人档案一起删了');
+  });
+
+  test('录入日志保留 —— 那是调优提示词的语料，最难再生', async () => {
+    /* 这条数据和「这次合作还在不在」没有关系。
+       删掉它等于把模型犯过的错一起抹掉，以后再犯一次也不会知道。 */
+    const logs = await db.listIntakeLogs({ creatorId });
+    assert.ok(Array.isArray(logs), 'listIntakeLogs 挂了');
+  });
+
+  test('删一条不存在的返回 false，不抛异常', async () => {
+    assert.equal(await db.deleteCollaboration('cb-99999'), false);
+  });
+});
