@@ -18,7 +18,11 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/* 单引号也转。当前所有属性插值都用双引号，所以不转 ' 暂时不可利用 ——
+   但那是「下一个人写 attr='${esc(x)}' 时才炸」的坑，而炸的时候
+   没人会想到是转义函数少了一个字符。多转一个字符没有代价。 */
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmtDate = (s) => (s ? new Date(s).toLocaleDateString('zh-CN') : '—');
 const fmtTime = (s) => (s ? new Date(s).toLocaleString('zh-CN') : '—');
 const daysAgo = (iso) => {

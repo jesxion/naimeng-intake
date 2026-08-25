@@ -27,8 +27,8 @@ process.env.NAIMENG_DATA_DIR = TMP;
 for (const k of ['LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY',
   'VISION_BASE_URL', 'VISION_MODEL', 'VISION_API_KEY']) delete process.env[k];
 
-const { mockExtract, locateSources, agentReady, visionReady, agentConfig, PROMPT_VERSION } =
-  await import('../lib/agent.js');
+const { mockExtract, locateSources, agentReady, visionReady, agentConfig,
+  extract, extractShipment, PROMPT_VERSION } = await import('../lib/agent.js');
 const db = await import('../lib/db.js');
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -156,6 +156,54 @@ describe('提交到版本库的文件不含真实个人信息', () => {
     const gi = readFileSync(join(ROOT, '.gitignore'), 'utf8');
     for (const rule of ['data/', '.env']) {
       assert.ok(gi.split('\n').some((l) => l.trim() === rule), `.gitignore 缺少规则：${rule}`);
+    }
+  });
+});
+
+/* ================================================================ */
+
+describe('未配置模型时真的走降级，而不是去调接口', () => {
+  test('extract 返回 mode=mock，不发任何网络请求', async () => {
+    /* 这条是审查报告指出来的，而且**跑起来才确认**：
+       `if (!agentReady())` —— agentReady 是 async，返回的 Promise 恒为 truthy，
+       取反永远是 false，所以那个 mock 分支从来没被进入过。
+       未配置模型时不降级，而是去 fetch 一个空 baseUrl，以「无法连接」失败。
+
+       和 agentConfig 漏 await 是同一个坑：那次修了 server.js 的调用点，
+       漏了 agent.js 内部这两处。README 承诺「不配模型也能跑」，
+       整段时间里是不成立的。 */
+    assert.equal(await agentReady(), false, '前提：这个测试进程里没有配模型');
+
+    const r = await extract('达人 豆豆的小窝 抖音号 100000031 收件 张某某 13800138000 示例省示例市示范路1号');
+    assert.equal(r.mode, 'mock', '没走降级 —— 说明那个分支又变成死代码了');
+    assert.equal(r.model, 'local-mock');
+    assert.ok(r.data, '降级也要产出结构化数据');
+    assert.equal(r.data.accounts?.[0]?.douyin_id?.v ?? r.data.accounts?.[0]?.douyin_id, '100000031');
+  });
+
+  test('extractShipment 抛的是「未配置视觉模型」，不是「无法连接」', async () => {
+    /* 截图没有本地降级可走（认不了图），所以这里是明确报错。
+       但报错内容必须是「去配视觉模型」，而不是一句让人一头雾水的网络错误。 */
+    assert.equal(await visionReady(), false, '前提：这个测试进程里没有配视觉模型');
+    await assert.rejects(
+      () => extractShipment('data:image/png;base64,iVBORw0KGgo='),
+      (e) => {
+        assert.equal(e.code, 'NO_VISION', `抛的是别的错：${e.message}`);
+        assert.match(e.message, /视觉模型/);
+        assert.ok(!/无法连接|ERR_INVALID_URL/.test(e.message), '去调接口了，没有前置拦住');
+        return true;
+      });
+  });
+
+  test('agentReady / visionReady 的调用点一律带 await', () => {
+    /* 断言源码而不只是行为：行为测试只能覆盖跑到的分支，
+       而这个坑的本质是「写的时候容易忘」，新加一处调用同样会中招。 */
+    for (const f of ['lib/agent.js', 'server.js']) {
+      const src = readFileSync(join(ROOT, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+      const bad = [...src.matchAll(/(?<!await\s)\b(agentReady|visionReady)\(\)/g)]
+        .filter((m) => !/export async function/.test(src.slice(Math.max(0, m.index - 40), m.index)));
+      assert.deepEqual(bad.map((m) => m[0]), [],
+        `${f} 里有没加 await 的 ${bad.map((m) => m[0]).join('、')}`);
     }
   });
 });

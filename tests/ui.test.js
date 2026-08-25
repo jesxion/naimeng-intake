@@ -641,3 +641,33 @@ describe('清理与统一', () => {
       '其他平台账号那块要么没渲染，要么守卫被改死了');
   });
 });
+
+/* ================================================================ */
+
+describe('转义', () => {
+  test('esc 真的把五个字符都转掉了', () => {
+    /* **把它抽出来执行**，不是搜源码里有没有那几个字符。
+       上一版断言只看映射表里有没有 "'": '&#39;' —— 而把正则从
+       [&<>"'] 改回 [&<>"] 时映射表原封不动，断言照样绿。
+       映射表里有 ≠ 正则会匹配到。 */
+    const src = app.match(/const esc = ([\s\S]*?\}\[c\]\)\);)/)[1];
+    // eslint-disable-next-line no-new-func
+    const esc = new Function(`return ${src.replace(/;$/, '')}`)();
+    assert.equal(esc('<a href="x">'), '&lt;a href=&quot;x&quot;&gt;');
+    assert.equal(esc("it's & ok"), 'it&#39;s &amp; ok');
+    /* 逐个对着期望值比，不能写成 `!esc(ch).includes(ch)` ——
+       & 的转义结果 &amp; 本身就含 &，那条断言对 & 永远失败。 */
+    assert.deepEqual(
+      ['&', '<', '>', '"', "'"].map(esc),
+      ['&amp;', '&lt;', '&gt;', '&quot;', '&#39;']);
+  });
+
+  test('属性插值一律用双引号 + esc', () => {
+    /* 单引号属性 + 未转义单引号 = XSS。两道防线：esc 转 '，
+       以及不写单引号属性。这条守后者。 */
+    // 注释里举反例是合法的，先剥掉注释再扫
+    const code = app.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const bad = [...code.matchAll(/\s\w+='\$\{/g)];
+    assert.deepEqual(bad.map((m) => m[0]), [], '出现了单引号属性里的插值');
+  });
+});
