@@ -323,3 +323,37 @@ describe('不寄样合作的初始状态', () => {
     assert.ok(db.COLLAB_STATUS.includes('进行中'));
   });
 });
+
+/* ================================================================ */
+
+describe('其他平台账号有出口', () => {
+  test('合作详情带出达人名下的其他平台账号', async () => {
+    /* 之前模型抽了、库里存了，但 expandCollaboration 不带出来，
+       前端也就没法显示 —— 整条链路只差最后一步，等于白做。 */
+    const c = await db.createCreator({
+      name: '多平台达人',
+      accounts: [{ nickname: '多平台达人', douyinId: '100000077' }],
+      otherAccounts: [{ platform: '微信视频号', accountId: 'sphDemo000000009' }],
+    }, 'u-1');
+    const cb = await db.createCollaboration({ creatorId: c.id, accountIds: [] }, 'u-1');
+    const full = await db.getCollaboration(cb.id);
+    assert.equal(full.otherAccounts.length, 1);
+    assert.equal(full.otherAccounts[0].accountId, 'sphDemo000000009');
+  });
+
+  test('没有其他平台账号时是空数组，不是 undefined', async () => {
+    const c = await db.createCreator({
+      name: '单平台达人', accounts: [{ nickname: '单平台达人', douyinId: '100000078' }],
+    }, 'u-1');
+    const cb = await db.createCollaboration({ creatorId: c.id, accountIds: [] }, 'u-1');
+    assert.deepEqual((await db.getCollaboration(cb.id)).otherAccounts, []);
+  });
+
+  test('带货方式能存进去', async () => {
+    const c = await db.createCreator({
+      name: '带货方式达人', accounts: [{ nickname: '带货方式达人', douyinId: '100000079' }],
+    }, 'u-1');
+    const cb = await db.createCollaboration({ creatorId: c.id, salesChannel: '直播', accountIds: [] }, 'u-1');
+    assert.equal((await db.getCollaboration(cb.id)).salesChannel, '直播');
+  });
+});

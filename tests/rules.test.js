@@ -443,3 +443,30 @@ describe('不寄样的合作', () => {
     assert.equal(rules.sanitizeForStore({ type: '<script>' }).type, '寄样合作');
   });
 });
+
+/* ================================================================ */
+
+describe('模型抽到的值不能一路丢掉', () => {
+  test('带货方式从 normalize 一直带到 sanitizeForStore', () => {
+    /* 和 cooperation_type 是同一个漏：模型抽得到（提示词里有，还有正则兜底），
+       但 normalize 不输出、sanitizeForStore 不保留、路由不传 ——
+       于是 collaborations.salesChannel 永远是空字符串，
+       详情里那一行永远不显示。没有任何报错。 */
+    const f = rules.normalize({ sales_channel: { v: '短视频', c: 0.9, s: '' }, accounts: [] }).form;
+    assert.equal(f.salesChannel, '短视频');
+    assert.equal(rules.sanitizeForStore(f).salesChannel, '短视频');
+  });
+
+  test('带货方式没抽到时是空串，不是 undefined', () => {
+    const f = rules.normalize({ accounts: [] }).form;
+    assert.equal(f.salesChannel, '');
+  });
+
+  test('其他平台账号一路保留', () => {
+    const f = rules.normalize({
+      other_platform_accounts: [{ platform: '微信视频号', account_id: 'sphDemo000000001' }],
+      accounts: [],
+    }).form;
+    assert.equal(rules.sanitizeForStore(f).otherAccounts[0].accountId, 'sphDemo000000001');
+  });
+});

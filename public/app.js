@@ -497,17 +497,21 @@ function todoRow(t) {
 
   const acts = el('div', 'acts');
   if (t.type === 'notify_creator') {
-    const cp = el('button', 'btn sm', '复制文案');
+    /* **复制即视为已告知**，和合作详情里那个按钮同一套语义。
+       之前这里是「复制文案」+「标记已告知」两个按钮，而详情里是一步 ——
+       同一个动作两个界面两种做法，用哪边的人都会觉得另一边不对劲。
+
+       统一成一步的理由：这个按钮存在的唯一目的就是把物流信息粘给达人，
+       复制完再点一下「我复制了」，是让人做一件系统已经知道的事。
+       代价（复制了没发出去）在两个界面上现在也是一致的。 */
+    const cp = el('button', 'btn primary sm', '复制物流并标记已告知');
     cp.onclick = async () => {
       const { notifyText } = await api('GET', '/api/collaborations/' + t.collaborationId);
-      toast(await copy(notifyText) ? '已复制，去微信发给达人' : '复制失败');
-    };
-    const mk = el('button', 'btn primary sm', '标记已告知');
-    mk.onclick = async () => {
+      if (!await copy(notifyText)) { toast('复制失败'); return; }
       await api('POST', `/api/collaborations/${t.collaborationId}/notified`, { value: true });
-      toast('已标记'); loadDesk();
+      toast('已复制，去微信发给达人'); loadDesk();
     };
-    acts.append(cp, mk);
+    acts.append(cp);
   }
   if (t.type === 'fill_tracking') {
     const b = el('button', 'btn primary sm', '回填快递');
@@ -1444,6 +1448,17 @@ async function openCollaboration(id) {
     box.append(cpRow('合作码', a.cooperationCode, { mono: true }));
     c1.append(box);
   });
+
+  /* 其他平台账号（视频号 / 快手 / 小红书 / 微信）。
+     提示词一直在抽、库里一直在存，之前界面上没有任何出口 ——
+     等于花了 token 又占了库，还让人以为「系统记着呢」。
+     只存档不参与业务：不寄样、不催拍、不同步到飞书。 */
+  if (cb.otherAccounts?.length) {
+    const other = el('div', 'acct');
+    other.append(el('div', 'an', `其他平台 · ${cb.otherAccounts.length} 个（仅存档）`));
+    cb.otherAccounts.forEach((o) => other.append(cpRow(o.platform || '其他', o.accountId, { mono: true })));
+    c1.append(other);
+  }
   L.append(c1);
 
   /* ── 2. 寄样信息 ─────────────────────────────────────────── */

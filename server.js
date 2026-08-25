@@ -6,8 +6,9 @@
  *   node --watch server.js  开发模式
  *   node --test tests/      跑回归
  *
- * 身份只有一个入口：await userOf(req)。现在读设置，将来读 token。
- * 代码里任何其他地方不得出现第二种「当前用户」取法。
+ * 身份只有一个入口：await userOf(req)，它读的是服务端签发的 HMAC 会话 cookie。
+ * 代码里任何其他地方不得出现第二种「当前用户」取法 ——
+ * 这条规则的价值兑现过一次：从「读请求头」换成「读签名会话」时只改了这一个函数。
  */
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
@@ -784,7 +785,8 @@ const routes = {
       .map((a) => a.id);
 
     const collaboration = await db.createCollaboration({
-      creatorId, type: form.type, recipient: form.recipient, sampleCost: form.sampleCost,
+      creatorId, type: form.type, salesChannel: form.salesChannel,
+      recipient: form.recipient, sampleCost: form.sampleCost,
       items: form.items, accountIds: accountIds.length ? accountIds : creator.accounts.map((a) => a.id),
     }, user.id);
 
