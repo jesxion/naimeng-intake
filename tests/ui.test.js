@@ -256,3 +256,40 @@ describe('源码卫生', () => {
     assert.ok(!/<select[^>]*id="[^"]*status/i.test(html), 'index.html 里出现了状态下拉框');
   });
 });
+
+/* ================================================================ */
+
+describe('记录表的飞书同步列', () => {
+  test('表头有「飞书同步」，且每行渲染一个胶囊', () => {
+    const f = fn('loadRecords');
+    assert.match(f, /飞书同步/, '表头缺这一列');
+    assert.match(f, /syncPill\(states\[cb\.id\]\)/, '行里没渲染状态');
+  });
+
+  test('胶囊用的类名在 CSS 里真实存在', () => {
+    /* 写一个不存在的 .st 变体不会报错，只会渲染成没有颜色的胶囊 ——
+       而「颜色没了」这种问题没人会去查 CSS，只会以为设计就是这样。 */
+    const block = app.match(/const SYNC_LABEL = \{[\s\S]*?\n\};/);
+    assert.ok(block, '找不到 SYNC_LABEL');
+    const used = [...block[0].matchAll(/cls:\s*'([a-z]+)'/g)].map((m) => m[1]);
+    assert.ok(used.length >= 5, '状态种类少了');
+    for (const c of new Set(used)) {
+      assert.match(css, new RegExp(`\\.st\\.${c}\\s*[,{]`), `CSS 里没有 .st.${c}`);
+    }
+  });
+
+  test('「未同步」和「同步失败」不是同一个样子', () => {
+    /* 混成一个的话，表里几十条灰的会把真正坏掉的那条淹没。 */
+    const block = app.match(/const SYNC_LABEL = \{[\s\S]*?\n\};/)[0];
+    const pick = (k) => block.match(new RegExp(`${k}:\\s*\\{[^}]*\\}`))[0];
+    assert.notEqual(pick('never').match(/cls:\s*'(\w+)'/)[1],
+                    pick('failed').match(/cls:\s*'(\w+)'/)[1]);
+  });
+
+  test('手动同步走单条接口，失败时把原因显示出来', () => {
+    assert.match(app, /\/api\/feishu\/sync-one/);
+    const f = fn('openCollaboration');
+    assert.match(f, /同步失败[\s\S]{0,40}esc\(e\.message\)/,
+      '只说「同步失败」对排查毫无帮助，必须显示飞书返回的原因');
+  });
+});

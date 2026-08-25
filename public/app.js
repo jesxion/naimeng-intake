@@ -1313,6 +1313,36 @@ async function openCollaboration(id) {
   box('归属', esc(cb.ownerName));
   box('建档', fmtTime(cb.createdAt));
   R.append(g);
+
+  /* 飞书同步：状态 + 手动重推。
+     放在详情里而不是只放表格那一列，是因为失败原因往往很长
+     （权限、列名、类型各有各的说法），表格的 title 挂不住。 */
+  const st = (RECORDS_SYNC || {})[cb.id];
+  if (st && st.state !== 'off') {
+    R.append(el('div', 'rh', '飞书同步'));
+    const fs = el('div', 'f');
+    fs.innerHTML = `<div class="src" style="font-family:inherit;font-size:12.8px">${syncPill(st)}`
+      + (st.state === 'synced' && st.at ? `<span class="dim"> · ${fmtTime(st.at)} · ${st.rows} 行</span>` : '')
+      + (st.error ? `<div class="dim" style="margin-top:6px;white-space:pre-wrap">${esc(st.error)}</div>` : '')
+      + '</div>';
+    const btn = el('button', 'btn sm', st.state === 'synced' ? '重新同步' : '立即同步');
+    btn.style.marginTop = '8px';
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = '同步中…';
+      try {
+        await api('POST', '/api/feishu/sync-one', { collaborationId: cb.id });
+        toast('已同步到飞书');
+        await loadRecords();          // 刷新那一列
+        await openCollaboration(cb.id);
+      } catch (e) {
+        /* 失败原因原样显示。「同步失败」四个字对排查毫无帮助。 */
+        btn.disabled = false; btn.textContent = '重试';
+        fs.append(el('div', 'alert warn', `<b>同步失败</b>${esc(e.message)}`));
+      }
+    };
+    fs.append(btn);
+    R.append(fs);
+  }
 }
 
 /* ---------- 回填快递 ---------- */
@@ -1472,6 +1502,35 @@ $$('#statusSeg button').forEach((b) => {
 let qTimer = null;
 $('#q').oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(loadRecords, 260); };
 
+/**
+ * 飞书同步状态胶囊。
+ *
+ * 「未同步」和「同步失败」必须能一眼分开 —— 前者多半是同步开启之前的老记录，
+ * 不需要做什么；后者是真出了问题，越早看见越好。混成一个灰点的话，
+ * 表里几十条都是灰的，真正坏掉的那条就淹没了。
+ */
+/** 记录表最近一次拉到的同步状态，详情抽屉复用它 */
+let RECORDS_SYNC = {};
+
+const SYNC_LABEL = {
+  /* cls 只能用 index.html 里真实存在的 .st 变体 ——
+     写一个不存在的类名不会报错，只会渲染成没有颜色的胶囊，
+     而「颜色没了」这种问题没人会去查 CSS。 */
+  off:     { text: '未启用', cls: 'queued',  tip: '飞书同步没开或没配完，去设置里看' },
+  never:   { text: '未同步', cls: 'queued',  tip: '这条从没推过，多半是开启同步之前就存在的记录' },
+  pending: { text: '待同步', cls: 'running', tip: '在队列里等推送' },
+  synced:  { text: '已同步', cls: 'done',    tip: '飞书里有对应的行' },
+  failed:  { text: '同步失败', cls: 'failed', tip: '重试到上限了，点开看原因' },
+};
+
+function syncPill(st) {
+  const d = SYNC_LABEL[st?.state] || SYNC_LABEL.never;
+  const tip = st?.error ? `${d.tip}：${st.error}`
+            : st?.state === 'synced' && st.at ? `${d.tip}（${daysAgo(st.at)}，${st.rows} 行）`
+            : d.tip;
+  return `<span class="st ${d.cls}" title="${esc(tip)}">${d.text}</span>`;
+}
+
 async function loadRecords() {
   const q = encodeURIComponent($('#q').value.trim());
   let data, todos = [];
@@ -1493,9 +1552,12 @@ async function loadRecords() {
     return;
   }
 
+  const states = data.syncStates || {};
+  RECORDS_SYNC = states;
   const t = el('table');
-  t.innerHTML = `<thead><tr><th style="width:22%">达人 / 账号</th><th style="width:14%">状态</th>
-    <th style="width:18%">寄样</th><th style="width:24%">快递</th><th style="width:22%">进展</th></tr></thead>`;
+  t.innerHTML = `<thead><tr><th style="width:20%">达人 / 账号</th><th style="width:12%">状态</th>
+    <th style="width:16%">寄样</th><th style="width:21%">快递</th><th style="width:19%">进展</th>
+    <th style="width:12%">飞书同步</th></tr></thead>`;
   const tb = el('tbody');
   list.forEach((cb) => {
     const tr = el('tr');
@@ -1510,7 +1572,8 @@ async function loadRecords() {
         <div class="mono dim">${accs}</div></td>
       <td><span class="st ${cb.status === '已完成' ? 'done' : 'queued'}">${esc(cb.status)}</span></td>
       <td>${items}</td><td class="mono">${pkgs}</td>
-      <td class="dim">${esc(prog)}</td>`;
+      <td class="dim">${esc(prog)}</td>
+      <td>${syncPill(states[cb.id])}</td>`;
     tr.onclick = () => openCollaboration(cb.id);
     tb.append(tr);
   });

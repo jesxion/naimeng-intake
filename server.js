@@ -422,6 +422,25 @@ const routes = {
     return { ok: true, already: false, field: created };
   },
 
+  /* 单条手动同步。失败时把原因原样抛给前端 ——
+     「同步失败」四个字对排查毫无帮助，用户需要看到是权限、列名还是类型的问题。 */
+  'POST /api/feishu/sync-one': async (req) => {
+    const s = await db.getSettings();
+    if (!sync.isEnabled(s)) throw httpError(400, sync.configProblems(s).join('；') || '同步未启用');
+    const b = await readBody(req);
+    const id = String(b.collaborationId || '');
+    if (!id) throw httpError(400, '缺 collaborationId');
+    if (!(await db.getCollaboration(id))) throw httpError(404, '合作不存在');
+
+    await sync.syncOne(id);
+    const st = sync.statesFor([id], s).get(id);
+    if (st.state === 'failed' || st.state === 'pending') {
+      /* pump 不抛异常（那是它的设计），所以失败要靠状态回读出来 */
+      if (st.error) throw httpError(502, st.error);
+    }
+    return { state: st };
+  },
+
   'POST /api/feishu/sync-now': async (req) => {
     const me = await requireUser(req);
     const b = await readBody(req);
@@ -754,12 +773,17 @@ const routes = {
   'GET /api/collaborations': async (req, p, url) => {
     const me = await userOf(req);
     const mine = url.searchParams.get('scope') !== 'all';
+    const collaborations = await db.listCollaborations({
+      ownerUserId: mine && me ? me.id : null,
+      status: url.searchParams.get('status') || null,
+      q: url.searchParams.get('q') || '',
+    });
+    /* 同步状态跟着列表一起返回，不另开一个接口 ——
+       分两次请求的话表格会先渲染出来再跳一下，而且两次之间状态可能已经变了。 */
+    const states = sync.statesFor(collaborations.map((c) => c.id), await db.getSettings());
     return {
-      collaborations: await db.listCollaborations({
-        ownerUserId: mine && me ? me.id : null,
-        status: url.searchParams.get('status') || null,
-        q: url.searchParams.get('q') || '',
-      }),
+      collaborations,
+      syncStates: Object.fromEntries(states),
       stats: await db.stats(),
     };
   },

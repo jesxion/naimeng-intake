@@ -474,3 +474,61 @@ describe('字段定义与取值函数不能分叉', () => {
     }
   });
 });
+
+/* ================================================================ */
+
+describe('每条合作的同步状态', () => {
+  let cb;
+
+  test('推过的是已同步，带行数和时间', async () => {
+    cb = await newCollab('状态测试达人', '100000051', '20000000051');
+    await sync.pump({ force: true });
+    const st = sync.statesFor([cb.id], await db.getSettings()).get(cb.id);
+    assert.equal(st.state, 'synced');
+    assert.equal(st.rows, 1, '一款产品应该是一行');
+    assert.ok(st.at, '缺少同步时间');
+  });
+
+  test('刚改动过的是待同步', async () => {
+    await db.markNotified(cb.id, true);   // 会 markDirty 入队
+    const st = sync.statesFor([cb.id], await db.getSettings()).get(cb.id);
+    assert.equal(st.state, 'pending');
+    await sync.pump({ force: true });
+  });
+
+  test('从没推过的是未同步，不是已同步', async () => {
+    /* 「未同步」和「同步失败」必须分得开：前者多半是开启同步之前的老记录，
+       后者是真出了问题。混成一个的话，表里几十条灰的会把坏掉的那条淹没。 */
+    const fresh = await newCollab('从未推送', '100000052', '20000000052');
+    for (const r of store.findBy('outbox', 'target', 'feishu')) store.remove('outbox', r.id);
+    const st = sync.statesFor([fresh.id], await db.getSettings()).get(fresh.id);
+    assert.equal(st.state, 'never');
+  });
+
+  test('同步没配好时一律 off —— 不假装每条都「未同步」', async () => {
+    const st = sync.statesFor([cb.id], { feishu: { enabled: false } }).get(cb.id);
+    assert.equal(st.state, 'off');
+  });
+
+  test('状态是推导出来的，不额外存一份', () => {
+    /* 存一份就要在每个改状态的地方记得更新它，迟早漏一处，
+       而漏掉的表现是「界面说已同步、飞书里其实没有」—— 比不显示更糟。 */
+    const cols = store.all('collaborations')[0] || {};
+    assert.ok(!('syncState' in cols), '合作表里多了一个会和事实分叉的状态字段');
+  });
+
+  test('手动同步立刻推，不受退避约束', async () => {
+    const before = fake.state.records.size;
+    for (const l of store.all('sync_links')) store.remove('sync_links', l.id);
+    /* 造一个「刚失败、正在退避」的局面：nextAt 设到很久以后 */
+    sync.enqueue(cb.id);
+    const row = store.findBy('outbox', 'entityId', cb.id)[0];
+    store.put('outbox', { ...row, attempts: 3, nextAt: new Date(Date.now() + 3600_000).toISOString() });
+
+    const idle = await sync.pump();          // 不带 force：应该什么都不做
+    assert.equal(idle.done, 0, '退避期内不该自动推');
+    await sync.syncOne(cb.id);
+    assert.ok(fake.state.records.size >= before, '手动同步没有立刻推');
+    assert.equal(sync.statesFor([cb.id], await db.getSettings()).get(cb.id).state, 'synced');
+  });
+});
