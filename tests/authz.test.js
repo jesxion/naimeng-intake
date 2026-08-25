@@ -271,3 +271,50 @@ describe('花钱和改配置的接口要有身份', () => {
     assert.equal((await api('POST', '/api/extract', { rawText: 'x' }, '')).status, 401);
   });
 });
+
+/* ================================================================ */
+
+describe('我的资料只能改自己', () => {
+  test('甲改资料不会动到乙 —— 哪怕请求体里指定了乙的 id', async () => {
+    /* 上一版的做法是按**姓名**去 users 表匹配，而表单里显示的是
+       全局最后保存的那个人 —— 于是甲一点保存就改到了乙的记录。
+       现在改谁只由会话决定，请求体里的 id 一律不看。 */
+    const a = await loginAs(BASE, { name: '资料甲', role: 'business' });
+    const b = await loginAs(BASE, { name: '资料乙', role: 'warehouse' });
+
+    const r = await api('PUT', '/api/settings',
+      { user: { id: b.me.id, name: '资料甲', role: 'business', phone: '13800138077' } }, a.cookie);
+    assert.equal(r.status, 200);
+    assert.equal(r.settings.user.id, a.me.id, '改到了别人头上');
+
+    const cfgB = await api('GET', '/api/config', null, b.cookie);
+    assert.equal(cfgB.me.name, '资料乙', '乙的姓名被改了');
+    assert.equal(cfgB.me.role, 'warehouse', '乙的角色被改了');
+    assert.equal(cfgB.settings.user.phone || '', '', '乙的电话被写进去了');
+  });
+
+  test('每个人看到的「我的资料」是自己的', async () => {
+    const a = await loginAs(BASE, { name: '资料甲' });
+    const b = await loginAs(BASE, { name: '资料乙' });
+    assert.equal((await api('GET', '/api/config', null, a.cookie)).settings.user.name, '资料甲');
+    assert.equal((await api('GET', '/api/config', null, b.cookie)).settings.user.name, '资料乙');
+  });
+
+  test('未登录不能改任何人的资料', async () => {
+    /* 拦住它的是全局守卫（/api/settings 不在 OPEN_ROUTES 里），
+       路由里那句 requireUser 是第二层 —— 变异验证过：单独去掉它这条仍然绿，
+       因为外层已经拦住了。两层都留着，是因为将来万一有人把这条路由
+       加进 OPEN_ROUTES，里层还能兜住。
+       以前「只改 user 的不拦」是真的放行过，那时设置页兼着首次建身份；
+       现在那件事归 /api/auth/bootstrap。 */
+    const r = await api('PUT', '/api/settings', { user: { name: '闯入者', role: 'business' } }, '');
+    assert.equal(r.status, 401);
+  });
+
+  test('改成别人的名字会被拒 —— 重名会让登录时的名单分不清谁是谁', async () => {
+    const a = await loginAs(BASE, { name: '资料甲' });
+    const r = await api('PUT', '/api/settings', { user: { name: '资料乙', role: 'business' } }, a.cookie);
+    assert.equal(r.status, 400);
+    assert.match(r.error || '', /已经有一位/);
+  });
+});

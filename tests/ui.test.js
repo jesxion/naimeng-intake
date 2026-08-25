@@ -342,3 +342,44 @@ describe('不寄样合作的录入界面', () => {
     assert.match(fn('loadRecords'), /进行中[\s\S]{0,20}running/);
   });
 });
+
+/* ================================================================ */
+
+describe('我的资料：只改当前登录的人', () => {
+  test('表单绑的是服务端按会话回的资料，不是全局设置', () => {
+    /* 曾经 settings.user 是一份全局的「当前用户」，谁保存谁覆盖：
+       商务甲打开设置页看到的是商务乙的姓名和角色，
+       一点保存还会按姓名去 users 表匹配、改到商务乙的记录上。 */
+    const f = fn('fillSettings');
+    assert.match(f, /s\.user\.name/);
+    assert.match(f, /CFG\.me/, '没有把当前登录者显示出来');
+  });
+
+  test('保存时不传 id —— 改谁由服务端按会话决定', () => {
+    const block = app.match(/\$\('#saveUser'\)\.onclick[\s\S]*?\n\};/)[0];
+    assert.match(block, /\/api\/settings/);
+    assert.ok(!/\bid:/.test(block),
+      '请求体里带了 id，等于把「改谁」做成一个客户端可控的参数');
+  });
+
+  test('面板叫「我的资料」，并写明改的是当前登录的人', () => {
+    assert.match(html, /data-panel="user"[^>]*>我的资料</);
+    assert.ok(html.includes('id="selfOnly"'), '缺少「改的永远是当前登录的人」的说明');
+  });
+});
+
+describe('源码里不能有调用不存在的函数', () => {
+  test('所有 loadXxx / renderXxx 调用点都有对应定义', () => {
+    /* 这条是踩出来的：待办并入工作台时 loadTodos 被删了，
+       但流程设置的保存回调里还留着一句 loadTodos()。
+       结果是保存其实成功了，却抛 ReferenceError 让「已保存」永远不显示 ——
+       用户只会觉得「点了没反应」，而控制台没人看。 */
+    const defined = new Set(
+      [...app.matchAll(/(?:async\s+)?function\s+(\w+)\s*\(/g)].map((m) => m[1])
+        .concat([...app.matchAll(/(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\(/g)].map((m) => m[1])));
+    const called = [...app.matchAll(/\b((?:load|render|refresh|open|close)[A-Z]\w*)\s*\(/g)]
+      .map((m) => m[1]);
+    const missing = [...new Set(called)].filter((n) => !defined.has(n));
+    assert.deepEqual(missing, [], `这些函数被调用但没有定义：${missing.join('、')}`);
+  });
+});

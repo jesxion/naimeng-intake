@@ -332,7 +332,11 @@ const routes = {
       me: me ? { id: me.id, name: me.name, role: me.role } : null,
       users: (await db.listUsers()).map((u) => ({ id: u.id, name: u.name, role: u.role })),
       settings: {
-        user: { ...s.user },
+        /* **只回当前登录者自己的资料**，不是一份全局的「当前用户」。
+           之前这里回的是 settings.user —— 谁最后保存谁覆盖，
+           于是商务甲打开设置页看到的是商务乙的姓名和角色。 */
+        user: me ? { id: me.id, name: me.name, role: me.role, phone: me.phone || '' }
+                 : { name: '', role: 'business', phone: '' },
         model: { provider: s.model.provider, baseUrl: s.model.baseUrl, model: s.model.model,
           apiStyle: s.model.apiStyle, concurrency: s.model.concurrency, timeoutMs: s.model.timeoutMs,
           hasApiKey: Boolean(s.model.apiKey), apiKeyMasked: mask(s.model.apiKey),
@@ -473,8 +477,8 @@ const routes = {
     if (!String(b.name || '').trim()) throw httpError(400, '请填写你的姓名');
     if (!db.ROLES.some((r) => r.id === b.role)) throw httpError(400, '角色不合法');
 
-    await db.saveSettings({ auth: { passphrase: hashPassphrase(pass) }, user: { name: b.name, role: b.role } });
-    const me = (await db.listUsers()).find((u) => u.name === String(b.name).trim());
+    await db.saveSettings({ auth: { passphrase: hashPassphrase(pass) } });
+    const me = await db.createUser({ name: b.name, role: b.role });
     return { ok: true, me: { id: me.id, name: me.name, role: me.role }, _setCookie: sessionCookie(issueSession(me.id)) };
   },
 
@@ -495,8 +499,11 @@ const routes = {
       if (!me) throw httpError(400, '选择的成员不存在');
     } else {
       if (!db.ROLES.some((r) => r.id === b.role)) throw httpError(400, '角色不合法');
-      await db.saveSettings({ user: { name: b.name, role: b.role } });
-      me = (await db.listUsers()).find((u) => u.name === String(b.name).trim());
+      /* 名单里没有自己时按姓名新建。同名直接复用那一位 ——
+         口令已经验过，能到这一步的都是团队内部的人。 */
+      const name = String(b.name).trim();
+      me = (await db.listUsers()).find((u) => u.name === name)
+        || await db.createUser({ name, role: b.role });
     }
     return { ok: true, me: { id: me.id, name: me.name, role: me.role }, _setCookie: sessionCookie(issueSession(me.id)) };
   },
@@ -505,16 +512,33 @@ const routes = {
 
   'PUT /api/settings': async (req) => {
     const patch = await readBody(req);
+    /* 全部要求登录。以前「只改 user 的不拦」是因为设置页兼着首次建身份，
+       现在那件事归 /api/auth/bootstrap 了 —— 再放行等于让未登录的人
+       随便改 users 表。 */
+    const me = await requireUser(req);
+
+    let updated = null;
     if (patch.user) {
       if (!String(patch.user.name || '').trim()) throw httpError(400, '请填写姓名');
       if (!db.ROLES.some((r) => r.id === patch.user.role)) throw httpError(400, '角色不合法');
+      /* **改的永远是自己**。请求体里就算带了 id 也不看 ——
+         客户端指定改谁，等于把越权改成一个请求参数。 */
+      try {
+        updated = await db.updateUser(me.id, {
+          name: patch.user.name, role: patch.user.role, phone: patch.user.phone,
+        });
+      } catch (e) { throw httpError(400, e.message); }
     }
-    // 改模型配置要花钱、还能把后续识别内容导向别人的服务器，必须先有身份。
-    // 只改 user 的不拦 —— 那是首次建立身份的唯一入口，拦了会死锁。
-    if (Object.keys(patch).some((k) => k !== 'user')) await requireUser(req);
-    const s = await db.saveSettings(patch);
+
+    const rest = { ...patch }; delete rest.user;
+    if (Object.keys(rest).length) await db.saveSettings(rest);
     pump();
-    return { ok: true, settings: { user: s.user }, agentReady: await agentReady(), visionReady: await visionReady() };
+    const u = updated || me;
+    return {
+      ok: true,
+      settings: { user: { id: u.id, name: u.name, role: u.role, phone: u.phone || '' } },
+      agentReady: await agentReady(), visionReady: await visionReady(),
+    };
   },
 
   'POST /api/settings/test': async (req) => {

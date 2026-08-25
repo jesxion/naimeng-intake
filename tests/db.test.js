@@ -210,7 +210,7 @@ describe('达人与账号', () => {
   });
 
   test('归属转交留痕，合作跟着达人一起转', async () => {
-    const u2 = (await db.saveSettings({ user: { name: '商务乙', role: 'business' } })).user;
+    const u2 = await db.createUser({ name: '商务乙', role: 'business' });
     const c = await db.transferOwner('cr-1', u2.id, 'u-1', '人员调岗');
     assert.equal(c.ownerUserId, u2.id);
     assert.equal(c.ownerHistory.at(-1).reason, '人员调岗');
@@ -249,7 +249,7 @@ describe('db 层的类型与身份契约', () => {
        如果第一次插入时 uid 存成了 Number，第二次拿字符串来比就对不上，
        同一个抖音号会在同一个达人下重复建账号 —— 实测过，确实会变成 2 条。
        store 层只归一了「列」，JSON 载荷里的类型得 db 层自己管。 */
-    const u = (await db.saveSettings({ user: { name: '类型测试员', role: 'business' } })).user;
+    const u = await db.createUser({ name: '类型测试员', role: 'business' });
     const c = await db.createCreator({ name: '类型达人', accounts: [{ nickname: 'n', uid: 20000000031 }] }, u.id);
     await db.addAccounts(c.id, [{ nickname: 'n', uid: '20000000031' }]);   // 同一个号，这次是字符串
 
@@ -264,7 +264,7 @@ describe('db 层的类型与身份契约', () => {
        注意：数字形态的合作码前导零在到达这里之前就已经没了，
        String() 救不回来 —— 它保证的是「不会以 Number 形态存进去」，
        否则后续所有 === 字符串比较都会静默失配。 */
-    const u = (await db.saveSettings({ user: { name: '合作码测试员', role: 'business' } })).user;
+    const u = await db.createUser({ name: '合作码测试员', role: 'business' });
     const c = await db.createCreator({
       name: '合作码达人',
       accounts: [{ nickname: 'm', douyinId: '100000099', cooperationCode: 4000000099 }],
@@ -275,7 +275,7 @@ describe('db 层的类型与身份契约', () => {
   });
 
   test('字符串形态的前导零合作码原样保留', async () => {
-    const u = (await db.saveSettings({ user: { name: '前导零测试员', role: 'business' } })).user;
+    const u = await db.createUser({ name: '前导零测试员', role: 'business' });
     const c = await db.createCreator({
       name: '前导零达人',
       accounts: [{ nickname: 'z', douyinId: '100000098', cooperationCode: '04000000098' }],

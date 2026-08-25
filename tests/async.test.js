@@ -86,7 +86,7 @@ describe('队列泵不丢任务', () => {
 
     // currentUser 不再回落到「第一个用户」—— 没有会话就是匿名。
     // 所以这里从 saveSettings 的返回里取 id，而不是靠回落拿。
-    const me = (await db.saveSettings({ user: { name: '商务甲', role: 'business' } })).user;
+    const me = await db.createUser({ name: '商务甲', role: 'business' });
     const N = 12, SLOTS = 2;
     for (let i = 0; i < N; i++) await db.createJob({ ownerUserId: me.id, rawText: `账号名称：达人${i}` });
 
@@ -115,7 +115,7 @@ describe('队列泵不丢任务', () => {
 
     // currentUser 不再回落到「第一个用户」—— 没有会话就是匿名。
     // 所以这里从 saveSettings 的返回里取 id，而不是靠回落拿。
-    const me = (await db.saveSettings({ user: { name: '商务甲', role: 'business' } })).user;
+    const me = await db.createUser({ name: '商务甲', role: 'business' });
     for (let i = 0; i < 6; i++) await db.createJob({ ownerUserId: me.id, rawText: `x${i}` });
 
     // 三路同时领，每路要 4 个 —— 加起来 12 > 6，必然发生争抢

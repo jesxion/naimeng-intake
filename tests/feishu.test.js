@@ -33,7 +33,7 @@ before(async () => {
   feishu = await import('../lib/feishu.js');
   store = await import('../lib/store.js');
 
-  me = (await db.saveSettings({ user: { name: '商务甲', role: 'business' } })).user;
+  me = await db.createUser({ name: '商务甲', role: 'business' });
   prod = await db.saveProduct({ name: '洁齿冻干' });
   await db.saveSettings({ feishu: {
     enabled: true,

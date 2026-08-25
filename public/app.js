@@ -1672,8 +1672,14 @@ function fillSettings() {
     }));
   }
   const s = CFG.settings;
+  /* 这一块永远是**当前登录者自己**的资料。
+     以前绑的是一份全局的 settings.user（谁保存谁覆盖），
+     于是商务甲打开设置页看到的是商务乙的姓名和角色，
+     一点保存还会按姓名匹配、改到商务乙的记录上去。 */
   setRole(s.user.role || 'business');
   $('#uName').value = s.user.name || ''; $('#uPhone').value = s.user.phone || '';
+  const who = $('#whoEditing');
+  if (who) who.textContent = CFG.me ? CFG.me.name : '你自己';
 
   $('#mProvider').value = s.model.provider || ''; $('#mBase').value = s.model.baseUrl || '';
   $('#mModel').value = s.model.model || ''; setStyle('m', s.model.apiStyle || 'chat');
@@ -1702,8 +1708,10 @@ $('#saveUser').onclick = async () => {
   const name = $('#uName').value.trim();
   if (!name) { msg('#userMsg', '请填写姓名', false); return; }
   try {
-    const r = await api('PUT', '/api/settings', { user: { name, role: curRole, phone: $('#uPhone').value.trim() } });
-    await refreshConfig(); loadJobs(); loadTodos(); loadRecords();
+    /* 不传 id：改谁由服务端按会话决定。
+       让客户端指定改谁，等于把越权做成一个请求参数。 */
+    await api('PUT', '/api/settings', { user: { name, role: curRole, phone: $('#uPhone').value.trim() } });
+    await refreshConfig(); loadDesk(); loadRecords();
     msg('#userMsg', '已保存');
   } catch (e) { msg('#userMsg', e.message, false); }
 };
@@ -1769,7 +1777,7 @@ $('#saveWorkflow').onclick = async () => {
       followUp: { firstDays: Number($('#fFirst').value) || 7, repeatDays: Number($('#fRepeat').value) || 5 },
       notifyTemplate: $('#tpl').value,
     });
-    await refreshConfig(); loadTodos(); msg('#wfMsg', '已保存');
+    await refreshConfig(); loadDesk(); msg('#wfMsg', '已保存');
   } catch (e) { msg('#wfMsg', e.message, false); }
 };
 

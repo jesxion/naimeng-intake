@@ -461,19 +461,20 @@ tbody tr:hover{background:#fbfcff}
   </header>
   <div class="wrap">
     <nav>
-      <button data-panel="user" class="on">用户设置</button>
+      <button data-panel="user" class="on">我的资料</button>
       <button data-panel="model">模型设置</button>
       <button data-panel="vision">视觉模型</button>
       <button data-panel="products">寄样产品</button>
       <button data-panel="feishu">飞书同步</button>
       <button data-panel="workflow">流程设置</button>
-      <div class="navnote" id="setupNote" style="display:none">首次使用请先填写用户设置，否则无法录入。</div>
+      <div class="navnote" id="setupNote" style="display:none">首次使用请先填写我的资料，否则无法录入。</div>
     </nav>
     <div class="body">
 
       <div class="spanel on" id="sp-user">
-        <h3>用户设置</h3>
-        <p>这台机器上的当前操作人。达人归属和操作留痕都记在这个身份下，归属人同时是待办的接收人。</p>
+        <h3>我的资料</h3>
+        <p>只影响<b id="whoEditing">你自己</b>这一个账号。达人归属和操作留痕都记在这个身份下，归属人同时是待办的接收人。</p>
+        <div class="alert" id="selfOnly" style="margin-bottom:12px"><b>改的永远是当前登录的人</b>换个人登录看到的就是那个人的资料。改自己的角色会立刻改变你能看到的功能。</div>
         <div class="frow"><label>角色</label><div class="role-chips" id="roleChips"></div></div>
         <div class="frow2">
           <div class="frow"><label>姓名</label><input id="uName" placeholder="例如：李雷"></div>
