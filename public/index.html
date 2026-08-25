@@ -483,6 +483,7 @@ tbody tr:hover{background:#fbfcff}
       <button data-panel="vision">视觉模型</button>
       <button data-panel="products">寄样产品</button>
       <button data-panel="feishu">飞书同步</button>
+      <button data-panel="logs">运行日志</button>
       <button data-panel="workflow">流程设置</button>
       <div class="navnote" id="setupNote" style="display:none">首次使用请先填写我的资料，否则无法录入。</div>
     </nav>
@@ -498,6 +499,20 @@ tbody tr:hover{background:#fbfcff}
           <div class="frow"><label>联系电话</label><input id="uPhone" placeholder="选填"></div>
         </div>
         <div class="sfoot"><button class="btn primary" id="saveUser">保存</button><span class="muted" id="userMsg"></span></div>
+      </div>
+
+      <div class="spanel" id="sp-logs">
+        <h3>运行日志</h3>
+        <p>左边是<b>谁做了什么</b>（审计），右边是<b>哪里坏了</b>（排查）。两者用途不同，不要混着看。
+          日志里<b>不含请求体</b> —— 达人姓名手机地址、API Key、团队口令都不会进来。</p>
+        <div class="seg" id="logSeg" style="margin-bottom:12px">
+          <button data-log="ops" class="on">操作日志</button>
+          <button data-log="failed">失败的操作</button>
+          <button data-log="errors">错误日志</button>
+        </div>
+        <div id="logBody"><div class="dim">加载中…</div></div>
+        <div class="sfoot"><button class="btn" id="logMore">加载更多</button>
+          <span class="muted" id="logMsg"></span></div>
       </div>
 
       <div class="spanel" id="sp-model">

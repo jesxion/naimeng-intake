@@ -21,6 +21,7 @@ import {
 } from './lib/auth.js';
 import * as feishu from './lib/feishu.js';
 import * as sync from './lib/sync.js';
+import * as logs from './lib/logs.js';
 import { extract, extractShipment, agentReady, agentConfig, visionReady, testConnection, PROMPT_VERSION } from './lib/agent.js';
 import {
   normalize, sanitizeForStore, validateForAction, validateVideoSubmit,
@@ -853,9 +854,13 @@ const routes = {
     if (!ok) throw httpError(404, '合作不存在');
     /* 留痕：不可逆的操作要能事后追问「这条是谁删的」。
        日志文件是唯一还在的地方 —— 记录本身已经没了。 */
-    console.log(`[删除] ${me.name}(${me.id}) 删除合作 ${p.id}`
-      + ` 达人=${cb.creatorName} 产品=${(cb.items || []).length} 包裹=${(cb.packages || []).length}`);
-    return { ok: true, deleted: p.id };
+    return {
+      ok: true, deleted: p.id,
+      /* 删除是唯一「记录本身没了、只剩日志」的动作，摘要要写得足够自解释：
+         事后看日志的人手上没有任何别的线索。 */
+      _audit: `删除合作 · 达人 ${cb.creatorName || '未命名'}`
+        + ` · ${(cb.items || []).length} 个产品行 · ${(cb.packages || []).length} 个包裹`,
+    };
   },
 
   /* 这条合作的原始识别记录。时间线上点一下就能看到「模型抽出什么、人改成什么」——
@@ -953,6 +958,32 @@ const routes = {
     return { creator: await db.getCreator(p.id) };
   },
 
+  /* ---------- 日志 ---------- */
+
+  /* 日志对全员可见。6 个人同处一间办公室，互相知道对方做了什么是常态；
+     而把审计日志做成「只有自己能看」，等于没有审计。
+     不含请求体，所以不会通过它泄漏出记录本身之外的东西。 */
+  'GET /api/logs/ops': async (req, p, url) => {
+    await requireUser(req);
+    const q = url.searchParams;
+    return logs.listOps({
+      limit: Math.min(Number(q.get('limit')) || 100, 300),
+      offset: Number(q.get('offset')) || 0,
+      userId: q.get('userId') || '',
+      target: q.get('target') || '',
+      onlyFailed: q.get('failed') === '1',
+    });
+  },
+
+  'GET /api/logs/errors': async (req, p, url) => {
+    await requireUser(req);
+    const q = url.searchParams;
+    return logs.listErrors({
+      limit: Math.min(Number(q.get('limit')) || 100, 300),
+      offset: Number(q.get('offset')) || 0,
+    });
+  },
+
   /* ---------- 待办 ---------- */
 
   'GET /api/todos': async (req) => {
@@ -970,6 +1001,18 @@ const routes = {
   },
 };
 
+/**
+ * 这条操作动的是哪个对象。
+ *
+ * 优先用路径参数里的 id；没有就看返回体里新建出来的那个 ——
+ * 「谁建了 cb-00042」和「谁改了 cb-00042」要能用同一个键查到一起。
+ */
+function auditTarget(hit, out) {
+  const p = hit.params || {};
+  if (p.id) return p.id;
+  return out?.collaboration?.id || out?.creator?.id || out?.job?.id || '';
+}
+
 function match(method, pathname) {
   for (const key of Object.keys(routes)) {
     const [m, pattern] = key.split(' ');
@@ -983,7 +1026,7 @@ function match(method, pathname) {
       if (pa[i].startsWith(':')) params[pa[i].slice(1)] = decodeURIComponent(pb[i]);
       else if (pa[i] !== pb[i]) { ok = false; break; }
     }
-    if (ok) return { handler: routes[key], params };
+    if (ok) return { handler: routes[key], params, pattern };
   }
   return null;
 }
@@ -997,12 +1040,24 @@ export const server = createServer(async (req, res) => {
   if (pathname.startsWith('/api/')) {
     const hit = match(req.method, pathname);
     if (!hit) return send(res, 404, { error: '接口不存在' });
+    const started = Date.now();
+    /* 所有非 GET 请求都会留一条操作日志。**在这里记，不在各个路由里记** ——
+       指望每个路由都记得调一次，迟早漏掉新加的那个，
+       而漏掉的表现是「这条记录谁改的查不到」，等要查的时候才发现没记。
+       和 markDirty 放在 db 层是同一个理由。 */
+    const audited = req.method !== 'GET';
+    let who = null;
     try {
       /* 全局守卫：除登录相关外，一律要求有效会话。
          局域网上线后同网段任何设备都能打到这些接口，
          逐个路由去记得加守卫迟早会漏一个 —— 默认拦住、显式放行才是对的。 */
       if (!OPEN_ROUTES.has(pathname)) {
-        if (!(await userOf(req))) throw httpError(401, '请先登录');
+        who = await userOf(req);
+        if (!who) throw httpError(401, '请先登录');
+      } else {
+        /* 开放路由（登录/初始化）也尽量记下是谁 —— 登出、重复初始化都值得留痕。
+           这里失败不能影响请求本身，所以单独 try 掉。 */
+        try { who = await userOf(req); } catch { who = null; }
       }
       const out = await hit.handler(req, hit.params, url);
       // 写操作之后顺手推一次飞书。故意不 await，也不管成败 ——
@@ -1010,15 +1065,42 @@ export const server = createServer(async (req, res) => {
       if (req.method !== 'GET' && !pathname.startsWith('/api/feishu/')) {
         sync.pump().catch(() => {});
       }
+      if (audited) {
+        logs.logOp({
+          action: `${req.method} ${hit.pattern}`,
+          user: who || (out && out.me) || null,
+          target: auditTarget(hit, out),
+          ok: true, status: 200, ms: Date.now() - started,
+          summary: out?._audit || '',
+        });
+      }
       // 处理器想种/清 cookie 时通过 _setCookie 传出来，不直接碰 res
       if (out && out._setCookie) {
-        const { _setCookie, ...body } = out;
+        const { _setCookie, _audit, ...body } = out;
         return send(res, 200, body, { 'Set-Cookie': _setCookie });
+      }
+      if (out && out._audit !== undefined) {
+        const { _audit, ...body } = out;
+        return send(res, 200, body);
       }
       return send(res, 200, out);
     } catch (e) {
       const status = e.status || 500;
-      if (status >= 500) console.error('[api]', pathname, e);
+      /* 4xx 是「用户做错了」，不是故障 —— 记进操作日志（ok=false）就够，
+         塞进错误日志会把真正的故障淹掉。
+         5xx 才是我们的问题，两边都记。 */
+      if (status >= 500) {
+        logs.logError(`${req.method} ${pathname}`, e,
+          { user: who, context: `HTTP ${status}` });
+      }
+      if (audited) {
+        logs.logOp({
+          action: `${req.method} ${hit.pattern}`, user: who,
+          target: auditTarget(hit, null),
+          ok: false, status, ms: Date.now() - started,
+          summary: e.message || '',
+        });
+      }
       return send(res, status, { error: e.message || '服务器错误', ...(e.extra || {}) });
     }
   }
@@ -1034,6 +1116,10 @@ export const server = createServer(async (req, res) => {
 });
 
 if (process.env.NODE_ENV !== 'test') {
+  /* 没被 catch 住的异常留一条日志再继续跑。测试环境不装 ——
+     那里希望异常直接冒出来让用例红掉。 */
+  logs.installProcessHandlers();
+
   // 默认只绑回环。这个服务里有达人手机号和地址，且没有登录，
   // 绑 0.0.0.0 等于同一个 WiFi 下谁都能打开。要局域网访问就显式 HOST=0.0.0.0。
   server.listen(PORT, HOST, async () => {

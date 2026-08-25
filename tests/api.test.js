@@ -253,3 +253,58 @@ describe('归属转交', () => {
     assert.ok(mine.some((c) => c.id === target.id), '转交后应出现在我的列表里');
   });
 });
+
+/* ================================================================ */
+
+describe('写操作自动留痕', () => {
+  test('每个非 GET 请求都记一条，路由自己什么都不用做', async () => {
+    /* 在请求处理外层记，不在各个路由里记 —— 指望每个路由都记得调一次，
+       迟早漏掉新加的那个，而漏掉的表现是「这条记录谁改的查不到」，
+       等要查的时候才发现没记。 */
+    const before = (await api('GET', '/api/logs/ops?limit=1')).total;
+    await api('POST', '/api/products', { name: '留痕测试产品' });
+    const after = await api('GET', '/api/logs/ops?limit=5');
+    assert.equal(after.total, before + 1, '写操作没留下日志');
+    assert.equal(after.rows[0].action, 'POST /api/products');
+    assert.ok(after.rows[0].userName, '没记下是谁做的');
+  });
+
+  test('GET 不记 —— 读操作记进去只会把有用的淹掉', async () => {
+    const before = (await api('GET', '/api/logs/ops?limit=1')).total;
+    await api('GET', '/api/products');
+    await api('GET', '/api/collaborations');
+    assert.equal((await api('GET', '/api/logs/ops?limit=1')).total, before);
+  });
+
+  test('失败的操作也记，标成 ok=false', async () => {
+    /* 「谁试图删了别人的记录但被拦住了」和「谁删成功了」都值得留痕。
+       只记成功的话，被拦住的尝试完全看不见。 */
+    const r = await api('POST', '/api/collaborations/cb-99999/status', { status: '已终止' });
+    assert.ok(r.status >= 400);
+    const top = (await api('GET', '/api/logs/ops?limit=1&failed=1')).rows[0];
+    assert.equal(top.ok, 0);
+    assert.ok(top.status >= 400);
+  });
+
+  test('日志里按路由模板聚合，不是每个 id 一种动作', async () => {
+    /* 记成 `POST /api/collaborations/cb-42/status` 的话，
+       「改状态这个动作一共发生过几次」永远算不出来。 */
+    const rows = (await api('GET', '/api/logs/ops?limit=50')).rows;
+    assert.ok(rows.some((r) => r.action.includes(':id')), '路由参数没有被模板化');
+    assert.ok(!rows.some((r) => /\/cb-\d+/.test(r.action)), 'action 里混进了具体 id');
+  });
+
+  test('日志不含请求体', async () => {
+    /* 请求体里有达人真实姓名手机地址、API Key、团队口令。
+       日志的价值是「谁动了哪条」，不是「改成了什么」。 */
+    await api('POST', '/api/products', { name: '秘密产品13800138123' });
+    const rows = (await api('GET', '/api/logs/ops?limit=10')).rows;
+    const blob = JSON.stringify(rows);
+    assert.ok(!blob.includes('秘密产品13800138123'), '请求体进日志了');
+  });
+
+  test('未登录看不到日志', async () => {
+    assert.equal((await api('GET', '/api/logs/ops', null, '')).status, 401);
+    assert.equal((await api('GET', '/api/logs/errors', null, '')).status, 401);
+  });
+});

@@ -1692,6 +1692,115 @@ async function openLogsModal(collaborationId, title) {
   </div>`).join('');
 }
 
+/* ================================================================ 运行日志 */
+
+let LOG = { kind: 'ops', offset: 0 };
+
+/**
+ * 把 `POST /api/collaborations/:id/packages` 这种路由模板翻成人话。
+ *
+ * 直接展示方法+路径也能看，但一屏几十行全是 URL，
+ * 眼睛得逐个解析 —— 而看日志的人多半是在找某一件具体的事。
+ * 翻不出来的就原样显示，不编。
+ */
+const OP_NAMES = {
+  'POST /api/collaborations': '建档',
+  'DELETE /api/collaborations/:id': '删除合作',
+  'POST /api/collaborations/:id/packages': '回填快递',
+  'POST /api/collaborations/:id/notified': '标记已告知',
+  'POST /api/collaborations/:id/status': '改状态',
+  'POST /api/fulfillments/:id': '更新履约项',
+  'POST /api/creators/:id/transfer': '转交归属',
+  'POST /api/creators/:id/accounts': '补充账号',
+  'POST /api/video/submit': '回传视频',
+  'POST /api/shipments/confirm': '批量回填快递',
+  'DELETE /api/packages/:id': '删除包裹',
+  'POST /api/products': '产品维护',
+  'DELETE /api/products/:id': '停用产品',
+  'PUT /api/settings': '改设置',
+  'POST /api/auth/login': '登录',
+  'POST /api/auth/logout': '登出',
+  'POST /api/auth/bootstrap': '初始化',
+  'POST /api/feishu/sync-one': '手动同步一条',
+  'POST /api/feishu/sync-now': '全量同步',
+  'POST /api/jobs': '提交识别',
+  'DELETE /api/jobs/:id': '移除识别任务',
+};
+const opName = (a) => OP_NAMES[a] || a;
+
+async function loadLogs(reset = true) {
+  if (reset) LOG.offset = 0;
+  const body = $('#logBody');
+  if (reset) body.innerHTML = '<div class="dim">加载中…</div>';
+
+  const path = LOG.kind === 'errors'
+    ? `/api/logs/errors?limit=50&offset=${LOG.offset}`
+    : `/api/logs/ops?limit=50&offset=${LOG.offset}${LOG.kind === 'failed' ? '&failed=1' : ''}`;
+
+  let data;
+  try { data = await api('GET', path); }
+  catch (e) { body.innerHTML = `<div class="alert warn"><b>读取失败</b>${esc(e.message)}</div>`; return; }
+
+  if (reset) body.innerHTML = '';
+  if (!data.rows.length && reset) {
+    body.innerHTML = `<div class="dim">${LOG.kind === 'errors' ? '没有错误记录 —— 这是好事'
+      : LOG.kind === 'failed' ? '没有失败的操作' : '还没有操作记录'}</div>`;
+  }
+
+  data.rows.forEach((r) => body.append(LOG.kind === 'errors' ? errRow(r) : opRow(r)));
+  LOG.offset += data.rows.length;
+  $('#logMore').style.display = LOG.offset < data.total ? '' : 'none';
+  msg('#logMsg', `共 ${data.total} 条，已显示 ${LOG.offset}`);
+}
+
+function opRow(r) {
+  const d = el('div', 'src');
+  d.style.cssText = 'font-family:inherit;margin-bottom:6px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap';
+  d.innerHTML = `<span class="dim mono" style="flex:none">${esc(fmtTime(r.at))}</span>`
+    + `<b style="flex:none">${esc(r.userName || '—')}</b>`
+    + `<span style="flex:none">${esc(opName(r.action))}</span>`
+    + (r.target ? `<span class="mono dim">${esc(r.target)}</span>` : '')
+    + (r.summary ? `<span class="dim">${esc(r.summary)}</span>` : '')
+    /* 失败的操作显式标出来。全成功时不加噪声，失败时一眼能挑出来。 */
+    + (r.ok ? '' : `<span class="st failed" style="margin-left:auto">失败 ${r.status}</span>`)
+    + (r.ms > 1000 ? `<span class="dim" style="margin-left:auto">${(r.ms / 1000).toFixed(1)}s</span>` : '');
+  return d;
+}
+
+function errRow(r) {
+  const d = el('div', 'src');
+  d.style.cssText = 'font-family:inherit;margin-bottom:10px';
+  d.innerHTML = `<div class="dim mono" style="margin-bottom:4px">${esc(fmtTime(r.at))}`
+    + ` · ${esc(r.source || '')}${r.userName ? ` · ${esc(r.userName)}` : ''}`
+    + `${r.context ? ` · ${esc(r.context)}` : ''}</div>`
+    + `<div style="color:var(--red);font-size:12.8px;word-break:break-all">${esc(r.message)}</div>`;
+  if (r.stack) {
+    /* 堆栈默认收起 —— 一屏铺满堆栈的话，「有几种错」这个最该先看到的信息就没了。 */
+    const tog = el('button', 'btn sm');
+    tog.style.marginTop = '6px';
+    tog.textContent = '展开堆栈';
+    const pre = el('div');
+    pre.style.cssText = 'display:none;white-space:pre-wrap;word-break:break-all;font:11.5px/1.6 ui-monospace,monospace;'
+      + 'margin-top:6px;padding:8px;background:var(--line-soft);border-radius:6px;max-height:240px;overflow:auto';
+    pre.textContent = r.stack;
+    tog.onclick = () => {
+      const on = pre.style.display === 'none';
+      pre.style.display = on ? '' : 'none';
+      tog.textContent = on ? '收起堆栈' : '展开堆栈';
+    };
+    d.append(tog, pre);
+  }
+  return d;
+}
+
+$$('#logSeg button').forEach((b) => {
+  b.onclick = () => {
+    $$('#logSeg button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on'); LOG.kind = b.dataset.log; loadLogs(true);
+  };
+});
+$('#logMore').onclick = () => loadLogs(false);
+
 /* ---------- 归属转交 ---------- */
 
 /**
@@ -1983,6 +2092,7 @@ function switchPanel(name) {
   $$('.settings nav button').forEach((b) => b.classList.toggle('on', b.dataset.panel === name));
   $$('.spanel').forEach((p) => p.classList.toggle('on', p.id === 'sp-' + name));
   if (name === 'feishu') loadFeishu();   // 每次进来重新拉状态，队列数要是实时的
+  if (name === 'logs') loadLogs(true);   // 同理，日志要是刚发生的那些
 }
 $('#openSettings').onclick = () => openSettings();
 $('#closeSettings').onclick = () => { $('#settings').classList.remove('on'); };

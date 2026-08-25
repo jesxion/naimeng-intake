@@ -277,7 +277,11 @@ rsync -a ~/apps/naimeng-intake/data/ /Volumes/备份盘/naimeng-data/
 | 飞书表里出现重复行 | 「系统ID」列没映射，或那一列被改名了 |
 | 某一列永远是空的 | 映射里那一项没选，或选完没点保存 |
 
-日志在 `data/server.log` 和 `data/server.err.log`。
+**先看界面里的日志**：设置 → 运行日志。左边是「谁做了什么」，右边是「哪里坏了」。
+大部分问题在那里就能定位，不用登到机器上。
+
+进程级的日志（起不来、崩溃、端口占用）在 `data/server.log`
+和 `data/server.err.log` —— 那些情况下界面本身就打不开。
 
 ```bash
 tail -f data/server.log
