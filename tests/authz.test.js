@@ -352,3 +352,29 @@ describe('删除合作的权限', () => {
     assert.equal((await api('DELETE', '/api/collaborations/cb-99999', null, a.cookie)).status, 404);
   });
 });
+
+/* ================================================================ */
+
+describe('原始识别记录也要拦归属', () => {
+  test('别人的合作看不到原文', async () => {
+    /* 原文里有达人的真实姓名、手机号、地址 —— 是这个系统里最敏感的一段。
+       其他按 id 直取的接口都拦了归属，这一条不能例外。 */
+    const a = await loginAs(BASE, { name: '原文甲' });
+    const b = await loginAs(BASE, { name: '原文乙' });
+    const made = await api('POST', '/api/collaborations', {
+      action: 'createRecord',
+      form: { name: '原文测试达人', accounts: [{ nickname: '原文测试达人', douyinId: '100000091' }], recipient: {} },
+    }, a.cookie);
+    assert.equal(made.status, 200, JSON.stringify(made));
+    const id = made.collaboration.id;
+
+    assert.equal((await api('GET', `/api/collaborations/${id}/logs`, null, b.cookie)).status, 403);
+    assert.equal((await api('GET', `/api/collaborations/${id}/logs`, null, a.cookie)).status, 200);
+    assert.equal((await api('GET', `/api/collaborations/${id}/logs`, null, '')).status, 401);
+  });
+
+  test('合作不存在时是 404，不是空数组', async () => {
+    const a = await loginAs(BASE, { name: '原文甲' });
+    assert.equal((await api('GET', '/api/collaborations/cb-99999/logs', null, a.cookie)).status, 404);
+  });
+});

@@ -858,6 +858,15 @@ const routes = {
     return { ok: true, deleted: p.id };
   },
 
+  /* 这条合作的原始识别记录。时间线上点一下就能看到「模型抽出什么、人改成什么」——
+     排查「这个字段怎么是错的」时，不用去翻别处。 */
+  'GET /api/collaborations/:id/logs': async (req, p) => {
+    const cb = await db.getCollaboration(p.id);
+    if (!cb) throw httpError(404, '合作不存在');
+    await ownerOr403(cb, req, '合作');
+    return { logs: await db.listIntakeLogs({ collaborationId: p.id }) };
+  },
+
   'POST /api/collaborations/:id/status': async (req, p) => {
     await ownerOr403(await db.getCollaboration(p.id), req, '合作');
     const b = await readBody(req);

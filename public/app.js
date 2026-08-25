@@ -1265,22 +1265,47 @@ async function confirmShipment() {
  */
 function timeline(cb) {
   const wrap = el('div', 'tl');
-  const add = (cls, title, sub) => {
+  /**
+   * @param openLog 有原始识别记录的节点传 true —— 点开能看到
+   *   「模型抽出什么、人改成什么」。没有记录的节点不做成可点，
+   *   点了什么都不弹比不能点更让人困惑。
+   */
+  const add = (cls, title, sub, openLog = false) => {
     const i = el('div', 'tl-i' + (cls ? ' ' + cls : ''));
     i.append(el('b', null, esc(title)), el('span', null, esc(sub)));
+    if (openLog) {
+      i.style.cursor = 'pointer';
+      i.title = '查看这一步的原始识别记录';
+      i.append(el('span', 'hintcp', ' 查看原文 ›'));
+      i.onclick = () => openLogsModal(cb.id, title);
+    }
     wrap.append(i);
   };
   const shipped = cb.packages[0];
   const pending = cb.fulfillments.filter((f) => f.expectVideo && f.filmingProgress !== '已发布' && f.filmingProgress !== '本次不出片');
   const done = cb.status === '已完成';
+  const published = cb.fulfillments.filter((f) => f.expectVideo && f.filmingProgress === '已发布');
 
-  add('done', '建档', `${fmtDate(cb.createdAt)} · ${esc(cb.ownerName)} · ${cb.fulfillments.length} 个抖音账号`);
-  if (shipped) add('done', '已寄样', `${fmtDate(shipped.shippedAt)} · ${esc(shipped.carrier)} ${esc(shipped.trackingNo)}`);
-  else add(cb.status === '已终止' ? '' : 'now', '等待仓库发货', '仓库回填快递单号后自动变「已寄样」');
-  if (cb.notifiedAt) add('done', '已告知达人', `${fmtDate(cb.notifiedAt)} · 单号已发出`);
-  else if (shipped) add('now', '该告知达人', '复制物流信息发微信，发完标记已告知');
+  /* 建档是唯一有完整识别记录的节点（原文 + 模型输出 + 人工修改）。
+     快递和视频只有来源标记，够不上「识别记录」，所以不做成可点。 */
+  add('done', '建档', `${fmtDate(cb.createdAt)} · ${esc(cb.ownerName)} · ${cb.fulfillments.length} 个抖音账号`, true);
+
+  if (shipped) {
+    const bySnap = cb.packages.some((p) => p.source && p.source !== 'manual');
+    add('done', '已寄样',
+      `${fmtDate(shipped.shippedAt)} · ${esc(shipped.carrier)} ${esc(shipped.trackingNo)}`
+      + (bySnap ? ' · 截图识别' : ''));
+  } else {
+    add(cb.status === '已终止' ? '' : 'now', '等待仓库发货', '仓库回填快递单号后自动变「已寄样」');
+  }
+
+  if (published.length) {
+    add(done ? 'done' : 'now', '已回传视频',
+      `${published.length}/${cb.fulfillments.filter((f) => f.expectVideo).length} 个账号已发布`);
+  }
+
   if (done) add('done', '已完成', '所有账号都已回传视频');
-  else if (shipped && cb.notifiedAt) add('now', '等待出片', `建档 ${daysAgo(cb.createdAt)} · ${pending.length} 个账号待发布`);
+  else if (shipped) add('now', '等待出片', `建档 ${daysAgo(cb.createdAt)} · ${pending.length} 个账号待发布`);
   else add('', '已完成', '所有账号回传视频后自动标记');
   return wrap;
 }
@@ -1359,9 +1384,7 @@ async function openCollaboration(id) {
   const L = $('#drLeft');
 
   /* ── 1. 达人档案 ─────────────────────────────────────────── */
-  const viewCreator = el('button', 'btn sm', '查看达人');
-  viewCreator.onclick = () => openCreator(cb.creatorId);
-  const c1 = dcard(`达人档案 · ${cb.fulfillments.length} 个账号`, viewCreator);
+  const c1 = dcard(`达人档案 · ${cb.fulfillments.length} 个账号`);
   if (!cb.fulfillments.length) {
     c1.append(el('div', 'empty-note', '这条合作没有绑定任何抖音账号'));
   }
@@ -1401,17 +1424,23 @@ async function openCollaboration(id) {
       ops.append(tk);
     } else {
       const cpAll = el('button', 'btn sm', '复制完整物流信息');
-      cpAll.onclick = async () => toast(await copy(notifyText) ? '已复制，可直接发给达人' : '复制失败');
+      /* 复制即视为已告知，不再单独一个「标记已告知」按钮。
+         这个按钮存在的唯一目的就是把物流信息粘给达人 ——
+         复制完了还要再点一下「我复制了」，是让人做一件系统已经知道的事。
+         代价：复制完又没发出去时，系统会以为告知过了。
+         相比「每次都多点一下、而且经常忘」，这个代价更小。 */
+      cpAll.onclick = async () => {
+        if (!await copy(notifyText)) { toast('复制失败'); return; }
+        if (!cb.notifiedAt) {
+          try { await api('POST', `/api/collaborations/${cb.id}/notified`, { value: true }); } catch { /* 标记失败不影响复制 */ }
+          toast('已复制，并标记为已告知达人');
+          await openCollaboration(cb.id); loadDesk(); loadRecords();
+        } else toast('已复制，可直接发给达人');
+      };
       const more = el('button', 'btn sm', '再加一个快递单号');
       more.onclick = () => openTrackingModal(cb.id);
       ops.append(cpAll, more);
     }
-    const nt = el('button', 'btn sm', cb.notifiedAt ? '取消已告知' : '标记已告知达人');
-    nt.onclick = async () => {
-      await api('POST', `/api/collaborations/${cb.id}/notified`, { value: !cb.notifiedAt });
-      toast('已更新'); await openCollaboration(cb.id); loadDesk(); loadRecords();
-    };
-    ops.append(nt);
     c2.append(ops);
   }
   L.append(c2);
@@ -1455,18 +1484,8 @@ async function openCollaboration(id) {
     } else {
       const ops = el('div', 'ops');
       const add = el('button', 'btn sm primary', '填写视频链接');
-      add.onclick = async () => {
-        const url = prompt(`${a.nickname || a.douyinId || '这个账号'} 的视频链接`);
-        if (url === null) return;
-        if (!/^https?:\/\//.test(url.trim())) { toast('请填一个 http 开头的链接'); return; }
-        try {
-          await api('POST', `/api/fulfillments/${f.id}`, { videoUrl: url.trim() });
-          toast('已保存'); await openCollaboration(cb.id); loadDesk(); loadRecords();
-        } catch (e) { toast(e.message); }
-      };
-      const fu = el('button', 'btn sm', '记录回访');
-      fu.onclick = () => openFollowUpModal(cb.id);
-      ops.append(add, fu);
+      add.onclick = () => openVideoLinkModal(cb.id, f);
+      ops.append(add);
       box.append(ops);
     }
     c3.append(box);
@@ -1534,6 +1553,144 @@ async function openCollaboration(id) {
 }
 
 /* ---------- 回填快递 ---------- */
+
+/* ---------- 视频链接 / 本次不出片 ---------- */
+
+/**
+ * 填写视频链接。
+ *
+ * 不用 prompt()：那个框没法校验、没法给第二个选项、粘长链接看不全，
+ * 而且在 Safari 上还会被当成弹窗拦掉。
+ *
+ * 「本次不出片」和填链接放在同一个弹窗里 —— 打开它的时机是一样的
+ * （商务问完达人有了结果），结果无非这两种。分成两个入口会让人先想
+ * 「我该点哪个」，而那是系统该替他省掉的一步。
+ */
+function openVideoLinkModal(collaborationId, f) {
+  const a = f.account || {};
+  const who = a.nickname || a.douyinId || a.uid || '这个账号';
+  const m = el('div', 'modal');
+  m.innerHTML = `<div class="box">
+    <h3>${esc(who)} 的视频</h3>
+    <p class="sub">填了链接会自动标记为「已发布」。<b>如果达人这次不出片</b>，
+      选下面那一项，这个账号就不再计入待办和进度分母。</p>
+    <div class="frow">
+      <label>视频链接</label>
+      <input id="vlUrl" class="mono" placeholder="https://www.douyin.com/video/…"
+        autocomplete="off" spellcheck="false">
+      <div class="hint" id="vlHint">抖音分享出来的链接，粘进来即可。也可以粘完整口令，系统会自己抠链接。</div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:12.8px;cursor:pointer;margin-top:4px">
+      <input type="checkbox" id="vlNone"> 本次不出片
+    </label>
+    <div class="acts"><button class="btn" id="vlCancel">取消</button>
+      <button class="btn primary" id="vlSave">保存</button></div>
+  </div>`;
+  document.body.append(m);
+  const close = () => m.remove();
+  m.onclick = (e) => { if (e.target === m) close(); };
+  m.querySelector('#vlCancel').onclick = close;
+
+  const url = m.querySelector('#vlUrl');
+  const none = m.querySelector('#vlNone');
+  const hint = m.querySelector('#vlHint');
+  const save = m.querySelector('#vlSave');
+
+  /* 勾了「本次不出片」就没有链接可填了 —— 让输入框自己变灰，
+     比留着一个能填但会被忽略的框诚实。 */
+  none.onchange = () => {
+    url.disabled = none.checked;
+    url.style.opacity = none.checked ? '.45' : '';
+    hint.textContent = none.checked
+      ? '这个账号不再计入待办和进度分母，随时可以改回来'
+      : '抖音分享出来的链接，粘进来即可。也可以粘完整口令，系统会自己抠链接。';
+  };
+
+  /* 粘完整口令时把链接抠出来 —— 达人发来的常常是一整段口令，
+     让人自己从里面找链接是多余的一步。 */
+  url.oninput = () => {
+    const hit = url.value.match(/https?:\/\/[^\s，,。、]+/);
+    if (hit && hit[0] !== url.value.trim()) url.value = hit[0];
+  };
+  setTimeout(() => url.focus(), 30);
+  url.onkeydown = (e) => { if (e.key === 'Enter') save.click(); };
+
+  save.onclick = async () => {
+    const patch = none.checked
+      ? { filmingProgress: '本次不出片' }
+      : { videoUrl: url.value.trim() };
+    if (!none.checked && !/^https?:\/\//.test(patch.videoUrl)) {
+      hint.textContent = '请填一个 http 开头的链接，或勾选「本次不出片」';
+      hint.style.color = 'var(--red)';
+      url.focus();
+      return;
+    }
+    save.disabled = true; save.textContent = '保存中…';
+    try {
+      await api('POST', `/api/fulfillments/${f.id}`, patch);
+      close();
+      toast(none.checked ? '已标记为本次不出片' : '已保存视频链接');
+      await openCollaboration(collaborationId);
+      loadDesk(); loadRecords();
+    } catch (e) {
+      save.disabled = false; save.textContent = '保存';
+      hint.textContent = e.message; hint.style.color = 'var(--red)';
+    }
+  };
+}
+
+/* ---------- 原始识别记录 ---------- */
+
+/**
+ * 时间线上点开的原文。
+ *
+ * 显示的是**模型抽出什么、人改成什么**（diff）。
+ * 排查「这个字段怎么是错的」时，这是唯一能回答的地方 ——
+ * 也是将来调优提示词的语料，每一条 diff 都是一次免费的标注。
+ */
+async function openLogsModal(collaborationId, title) {
+  const m = el('div', 'modal');
+  m.innerHTML = `<div class="box" style="max-width:680px">
+    <h3>${esc(title || '原始识别记录')}</h3>
+    <p class="sub">这条合作建档时的原文、模型输出，以及人工改了哪些字段。</p>
+    <div id="lgBody"><div class="dim">加载中…</div></div>
+    <div class="acts"><button class="btn" id="lgClose">关闭</button></div>
+  </div>`;
+  document.body.append(m);
+  const close = () => m.remove();
+  m.onclick = (e) => { if (e.target === m) close(); };
+  m.querySelector('#lgClose').onclick = close;
+
+  const body = m.querySelector('#lgBody');
+  let logs = [];
+  try {
+    logs = (await api('GET', `/api/collaborations/${collaborationId}/logs`)).logs || [];
+  } catch (e) {
+    body.innerHTML = `<div class="alert warn"><b>读取失败</b>${esc(e.message)}</div>`;
+    return;
+  }
+  if (!logs.length) {
+    /* 手工建档、或迁移过来的老记录没有识别记录。说清楚为什么没有，
+       而不是给一个空白的框让人以为坏了。 */
+    body.innerHTML = '<div class="dim">这条合作没有识别记录 —— '
+      + '手工建档或从旧数据迁移来的记录不会有原文。</div>';
+    return;
+  }
+  body.innerHTML = logs.map((l) => `<div class="src" style="font-family:inherit;margin-bottom:12px">
+    <div class="dim mono" style="margin-bottom:6px">
+      ${esc(l.confirmedByName || '—')} · ${fmtTime(l.confirmedAt)}
+      · ${l.mode === 'llm' ? esc(l.model) : '本地模拟'} · ${esc(l.promptVersion || '')}
+      ${l.elapsedMs ? ` · 耗时 ${(l.elapsedMs / 1000).toFixed(1)}s` : ''}
+    </div>
+    <div style="white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.7;
+      max-height:220px;overflow:auto;padding:8px;background:var(--line-soft);border-radius:6px">${
+        esc(l.rawText || '（无原文）')}</div>
+    ${l.diff?.length
+      ? `<div style="margin-top:8px;font-size:12.5px"><b>人工修改 ${l.diff.length} 处</b>${
+        l.diff.map((d) => `<div class="dim">${esc(d.field)}：「${esc(d.before || '空')}」→「${esc(d.after || '空')}」</div>`).join('')}</div>`
+      : '<div class="dim" style="margin-top:8px;font-size:12.5px">模型的输出未被修改</div>'}
+  </div>`).join('');
+}
 
 /* ---------- 归属转交 ---------- */
 
@@ -1656,58 +1813,6 @@ async function openFollowUpModal(collaborationId) {
 
 /* ---------- 达人详情 ---------- */
 
-async function openCreator(id) {
-  const { creator: c, logs } = await api('GET', '/api/creators/' + id);
-  openDrawer({
-    title: c.name || '达人详情',
-    tags: [{ text: '归属 ' + c.ownerName, cls: 'queued' }],
-    foot: [],
-    onClose: () => loadRecords(),
-  });
-
-  const L = $('#drLeft');
-  L.innerHTML = `<div class="rh">抖音账号（${c.accounts.length}）</div>
-    ${c.accounts.map((a) => `<div class="mcard" style="grid-template-columns:1fr;cursor:default">
-      <div><div class="hd"><b>${esc(a.nickname || '（无昵称）')}</b></div>
-      <div class="sub">抖音号 ${esc(a.douyinId || '—')} · UID ${esc(a.uid || '—')} · 合作码 ${esc(a.cooperationCode || '—')}</div></div>
-    </div>`).join('') || '<div class="dim">无</div>'}
-    ${c.otherAccounts.length ? `<div class="rh">其他平台账号（仅存档，不参与业务）</div>
-      ${c.otherAccounts.map((o) => `<div class="src">${esc(o.platform)} · ${esc(o.accountId)}</div>`).join('')}` : ''}
-    <div class="rh">合作历史（${c.collaborations.length}）</div>
-    ${c.collaborations.map((cb) => `<div class="src" style="font-family:inherit;margin-bottom:6px">
-      <b>${esc(cb.status)}</b> · ${cb.items.map((i) => esc(i.productName) + ' ×' + i.quantity).join('、') || '未填产品'}
-      · ${fmtDate(cb.createdAt)}</div>`).join('') || '<div class="dim">无</div>'}`;
-
-  const tr = el('div'); tr.style.marginTop = '14px';
-  tr.append(el('div', 'rh', '归属转交 · 归属人是责任人，待办发给他。人员变动时在这里转交，会留痕。'));
-  const trRow = el('div'); trRow.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
-  const sel = el('select'); sel.style.cssText = 'padding:7px 10px;border:1px solid var(--line);border-radius:7px';
-  (CFG.users || []).forEach((u) => { const o = el('option', null, `${esc(u.name)}`); o.value = u.id; sel.append(o); });
-  sel.value = c.ownerUserId;
-  const btn = el('button', 'btn sm', '转交');
-  btn.onclick = async () => {
-    if (sel.value === c.ownerUserId) { toast('归属没有变化'); return; }
-    const reason = prompt('转交原因（会留痕）', '人员调整') || '';
-    try {
-      await api('POST', `/api/creators/${c.id}/transfer`, { toUserId: sel.value, reason });
-      closeDrawer(); toast('已转交');
-    } catch (e) { toast(e.message); }
-  };
-  trRow.append(sel, btn); tr.append(trRow); L.append(tr);
-
-  const R = $('#drRight');
-  R.innerHTML = `<div class="rh">识别留痕</div>
-    ${(logs || []).map((l) => `<div class="src" style="font-family:inherit;margin-bottom:8px">
-      确认人 <b>${esc(l.confirmedByName || '—')}</b> · ${fmtTime(l.confirmedAt)}${l.elapsedMs ? ` · 耗时 ${(l.elapsedMs / 1000).toFixed(1)}s` : ''}
-      <div class="dim mono">${l.mode === 'llm' ? esc(l.model) : '本地模拟'} · ${esc(l.promptVersion)}</div>
-      ${l.diff?.length ? `<div class="dim" style="margin-top:6px">人工修改 ${l.diff.length} 处：${
-        l.diff.map((d) => `${esc(d.field)}「${esc(d.before || '空')}」→「${esc(d.after || '空')}」`).join('；')}</div>`
-        : '<div class="dim" style="margin-top:6px">未修改任何字段</div>'}
-    </div>`).join('') || '<div class="dim">无</div>'}
-    <div class="rh">默认收件</div>
-    <div class="src" style="font-family:inherit">${esc(c.defaultRecipient?.name || '—')} ${esc(c.defaultRecipient?.phone || '')}
-      <div class="dim">${esc(c.defaultRecipient?.address || '')}</div></div>`;
-}
 
 /* ================================================================ 合作记录 */
 

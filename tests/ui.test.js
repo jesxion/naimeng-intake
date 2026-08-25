@@ -483,11 +483,87 @@ describe('合作详情：五张卡片', () => {
     const f = fn('openCollaboration');
     assert.match(f, /填写视频链接/);
     assert.match(f, /复制完整视频信息/);
-    assert.match(f, /\/api\/fulfillments\/\$\{f\.id\}`, \{ videoUrl/);
+    // 填写走的是正式弹窗，不是 prompt()
+    assert.match(f, /openVideoLinkModal\(cb\.id, f\)/);
+    assert.match(fn('openVideoLinkModal'), /\/api\/fulfillments\/\$\{f\.id\}/);
   });
 
   test('转交走达人，并说清会连带转走名下所有合作', () => {
     assert.match(fn('openCollaboration'), /openTransferModal\(cb\.creatorId/);
     assert.match(fn('openTransferModal'), /名下的所有合作会一起转/);
+  });
+});
+
+/* ================================================================ */
+
+describe('详情的四项精简', () => {
+  test('达人档案里没有「查看达人」，openCreator 整个删掉', () => {
+    /* 留一个只定义不调用的函数比删掉更糟 —— 下一个人会以为它还在用，
+       改别处时还得顺带维护它。 */
+    assert.ok(!/查看达人/.test(app), '按钮还在');
+    assert.ok(!/function openCreator\b/.test(app), 'openCreator 没删干净');
+    assert.ok(!/openCreator\(/.test(app), '还有地方在调 openCreator');
+  });
+
+  test('寄样信息里没有「标记已告知」按钮，改为复制即标记', () => {
+    /* 这个按钮存在的唯一目的就是把物流信息粘给达人。
+       复制完还要再点一下「我复制了」，是让人做一件系统已经知道的事。 */
+    const f = fn('openCollaboration');
+    assert.ok(!/标记已告知达人|取消已告知/.test(f), '按钮还在');
+    assert.match(f, /复制完整物流信息/);
+    /* 断言的是**条件本身**，不只是那行调用在不在 ——
+       把守卫改成 if (false) 时调用还在，只是永远不执行，
+       只搜字符串的断言照样绿。 */
+    assert.match(f, /copy\(notifyText\)[\s\S]{0,200}if \(!cb\.notifiedAt\)[\s\S]{0,200}\/notified`/,
+      '复制之后没有顺手标记已告知，那条待办会永远清不掉');
+  });
+
+  test('视频信息里没有「记录回访」，填写走正式弹窗不是 prompt', () => {
+    const f = fn('openCollaboration');
+    assert.ok(!/记录回访/.test(f), '按钮还在');
+    /* prompt() 没法校验、没法给第二个选项、粘长链接看不全，
+       Safari 上还会被当成弹窗拦掉。 */
+    assert.ok(!/prompt\(/.test(fn('openVideoLinkModal')), '弹窗里还在用 prompt');
+  });
+
+  test('填写视频链接的弹窗里能选「本次不出片」', () => {
+    /* 打开它的时机是一样的（问完达人有了结果），结果无非这两种。
+       分成两个入口会让人先想「我该点哪个」。 */
+    const f = fn('openVideoLinkModal');
+    assert.match(f, /本次不出片/);
+    assert.match(f, /filmingProgress: '本次不出片'/);
+    assert.match(f, /url\.disabled = none\.checked/,
+      '勾了不出片，链接框该变灰 —— 留着一个能填但会被忽略的框是骗人');
+  });
+
+  test('粘完整口令时自动抠出链接', () => {
+    assert.match(fn('openVideoLinkModal'), /match\(\/https\?:/);
+  });
+
+  test('时间线不再有「告知达人」这一项', () => {
+    const f = fn('timeline');
+    assert.ok(!/已告知达人|该告知达人/.test(f), '时间线还在讲告知');
+  });
+
+  test('建档节点可点开原始识别记录，没记录的节点不做成可点', () => {
+    /* 点了什么都不弹，比不能点更让人困惑。 */
+    const f = fn('timeline');
+    assert.match(f, /add\('done', '建档'[\s\S]{0,140}, true\)/);
+    assert.match(f, /openLogsModal\(/);
+    const calls = [...f.matchAll(/add\((?:[^()]|\([^()]*\))*\)/g)].map((m) => m[0]);
+    const clickable = calls.filter((c) => /,\s*true\)$/.test(c));
+    assert.equal(clickable.length, 1, '只有建档有完整识别记录，其余节点不该可点');
+  });
+
+  test('没有识别记录时说清为什么，而不是给一个空框', () => {
+    // 同样断言条件，不只断言那句话在源码里
+    assert.match(fn('openLogsModal'), /if \(!logs\.length\)[\s\S]{0,240}手工建档或从旧数据迁移/);
+  });
+
+  test('原始记录展示的是 diff —— 模型抽出什么、人改成什么', () => {
+    const f = fn('openLogsModal');
+    assert.match(f, /l\.rawText/);
+    assert.match(f, /l\.diff/);
+    assert.match(f, /人工修改/);
   });
 });
