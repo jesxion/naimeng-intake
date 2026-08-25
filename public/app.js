@@ -1786,6 +1786,18 @@ async function loadFeishuFields(tableId) {
 function renderFeishuMap(writable) {
   $('#fsMapBlocked').style.display = 'none';
   const box = $('#fsMap'); box.innerHTML = '';
+  /* 系统表的列名和字段名是一一对应的（都来自 feishu-schema.js），
+     所以首次配置时按同名自动填上 —— 28 个下拉手点一遍，
+     既折磨人又容易点错一两个，而点错的表现是「那一列一直是空的」，
+     没人会想到回来查映射。
+     只在从未设置过时自动填；显式选了「不同步」的（空串）不覆盖。 */
+  let auto = 0;
+  (FS.sourceFields || []).forEach((sf) => {
+    if (FS.mapping?.[sf.id] === undefined) {
+      const hit = (FS_FIELDS || []).find((f) => f.name === sf.label && writable.has(f.type));
+      if (hit) { FS.mapping = { ...FS.mapping, [sf.id]: hit.name }; auto++; }
+    }
+  });
   (FS.sourceFields || []).forEach((sf) => {
     const row = el('div');
     row.style.cssText = 'display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;margin-bottom:7px';
@@ -1820,17 +1832,24 @@ function renderFeishuMap(writable) {
       mk.onclick = async () => {
         mk.disabled = true; mk.textContent = '创建中…';
         try {
-          const r = await api('POST', '/api/feishu/create-field', { name: '系统ID' });
+          const r = await api('POST', '/api/feishu/create-field', { name: sf.label });
           await loadFeishuFields(FS.tableId);
-          FS.mapping = { ...FS.mapping, systemId: r.field.name };
+          FS.mapping = { ...FS.mapping, [sf.id]: r.field.name };
           renderFeishuMap(new Set(writable));
-          msg('#fsMsg', r.already ? '这一列已经存在，已自动选中' : '已创建「系统ID」列并选中，记得点保存');
+          msg('#fsMsg', r.already ? `「${sf.label}」这一列已经存在，已自动选中`
+                                  : `已创建「${sf.label}」列并选中，记得点保存`);
         } catch (e) { msg('#fsMsg', e.message, false); mk.disabled = false; mk.textContent = '在飞书表里创建这一列'; }
       };
       help.append(mk, el('span', 'dim', '会在表末尾加一列多行文本，不影响已有数据'));
       box.append(help);
     }
   });
+
+  if (auto) {
+    /* 自动填了但还没保存 —— 不说清楚的话，用户关掉页面就白填了 */
+    box.prepend(el('div', 'alert',
+      `<b>已按同名自动匹配 ${auto} 项</b>核对一遍，然后点下面的保存 —— 不保存不生效。`));
+  }
 
   if (!FS_FIELDS.length) {
     box.append(el('div', 'dim', '这张表还没有列，或读取失败'));

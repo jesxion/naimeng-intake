@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { startFakeFeishu } from './helpers/fake-feishu.js';
+import { SYSTEM_TABLE } from '../lib/feishu-schema.js';
 
 const DIR = mkdtempSync(join(tmpdir(), 'naimeng-feishu-'));
 process.env.NAIMENG_DATA_DIR = DIR;
@@ -38,11 +39,9 @@ before(async () => {
     enabled: true,
     appId: 'cli_test', appSecret: 'secret_test',
     appToken: 'appTokenSample', tableId: 'tblSample', tableName: '达人寄样信息',
-    mapping: {
-      systemId: '系统ID', creatorName: '达人名称', douyinIds: '抖音号',
-      status: '合作状态', sampleCost: '寄样费用', notified: '已告知达人',
-      createdAt: '建档时间', trackingNos: '快递单号',
-    },
+    /* 全量映射 —— 系统表的列名和字段一一对应，界面上也是按同名自动匹配的，
+       所以测试就照真实配置来，不挑几个字段做一份不存在的配置。 */
+    mapping: Object.fromEntries(SYSTEM_TABLE.map((w) => [w.from, w.col])),
   } });
 });
 
@@ -121,12 +120,37 @@ describe('推送', () => {
     assert.equal(fake.state.records.size, 1);
 
     const rec = [...fake.state.records.values()][0];
-    assert.equal(rec['系统ID'], cb.id);
+    /* 系统ID 是行标识 `合作ID#产品行ID`，不是合作 id ——
+       一条合作有几款产品就有几行，光用合作 id 分不开它们。 */
+    const item = (await db.getCollaboration(cb.id)).items[0];
+    assert.equal(rec['系统ID'], `${cb.id}#${item.id}`);
+    assert.equal(rec['合作ID'], cb.id);
     assert.equal(rec['达人名称'], '豆豆的小窝');
     assert.equal(rec['抖音号'], '100000031');
     assert.equal(rec['合作状态'], '待寄样');
     assert.equal(typeof rec['已告知达人'], 'boolean');
     assert.equal(typeof rec['建档时间'], 'number');
+  });
+
+  test('产品名称是纯名字，数量单独一列 —— 不是「名称 ×数量」', async () => {
+    /* 真实反馈：产品名称列里出现「洁齿冻干 ×2」，而数量列永远是空的。
+       原因是当时还在用老的「寄样产品」字段，它把整条合作的产品拼成一格。
+       一行一款产品之后，这两件事必须是分开的两列。 */
+    const rec = [...fake.state.records.values()][0];
+    assert.equal(rec['产品名称'], '洁齿冻干');
+    assert.ok(!/[×x]\s*\d/.test(rec['产品名称']), '产品名称里混进了数量');
+    assert.equal(rec['数量'], 2);
+    assert.equal(typeof rec['数量'], 'number', '数量列是数字类型，不能写字符串');
+  });
+
+  test('是否寄样 = 是；同步时间被写上', async () => {
+    const rec = [...fake.state.records.values()][0];
+    /* 「是否寄样」问的是这条记录是不是一次寄样，不是「有没有发出去」。
+       有产品行就是「是」—— 之前按合作状态派生，待寄样时会写成「否」，
+       而那一行明明已经有产品了。 */
+    assert.equal(rec['是否寄样'], '是');
+    assert.equal(typeof rec['同步时间'], 'number', '同步时间没记录');
+    assert.ok(Math.abs(Date.now() - rec['同步时间']) < 60_000, '同步时间不是本次推送的时间');
   });
 
   test('推完队列清空', async () => {
@@ -346,5 +370,107 @@ describe('权限类错误码的翻译', () => {
     assert.ok(w, '缺少「写入权限」这一步，用户会以为测试通过就等于能写');
     assert.match(w.detail, /未验证/);
     assert.match(w.detail, /1254302/, '要指明失败时会看到什么码，否则这条提示没有落点');
+  });
+});
+
+/* ================================================================ */
+
+describe('一款产品一行', () => {
+  let cb, p2;
+
+  test('两款产品推出两行，各自带自己的数量', async () => {
+    p2 = await db.saveProduct({ name: '鸡肉冻干条' });
+    const creator = await db.createCreator({
+      name: '多品测试', recipient: { name: '李某某', phone: '13800138001', address: '示例地址' },
+      accounts: [{ nickname: '多品测试', douyinId: '100000041', uid: '20000000041' }],
+    }, me.id);
+    const accounts = (await db.getCreator(creator.id)).accounts;
+    cb = await db.createCollaboration({
+      creatorId: creator.id,
+      recipient: { name: '李某某', phone: '13800138001', address: '示例地址' },
+      items: [
+        { productId: prod.id, productName: prod.name, quantity: 2 },
+        { productId: p2.id, productName: p2.name, quantity: 5 },
+      ],
+      accountIds: accounts.map((a) => a.id),
+    }, me.id);
+
+    const before = fake.state.records.size;
+    const r = await sync.pump({ force: true });
+    assert.equal(r.failed, 0, JSON.stringify(r));
+    assert.equal(fake.state.records.size, before + 2, '两款产品应该推出两行');
+
+    const mine = [...fake.state.records.values()].filter((x) => x['合作ID'] === cb.id);
+    assert.deepEqual(mine.map((x) => x['产品名称']).sort(), ['洁齿冻干', '鸡肉冻干条']);
+    assert.deepEqual(mine.map((x) => x['数量']).sort((a, b) => a - b), [2, 5]);
+  });
+
+  test('寄样费用只写第一行 —— 每行都写的话飞书求和会翻倍', async () => {
+    /* 直接改库：目前还没有「编辑合作」的接口，
+       而这条不变量必须现在就锁住 —— 等编辑功能做出来再补，
+       就成了「上线后才发现合计虚高」。 */
+    const raw = store.get('collaborations', cb.id);
+    store.put('collaborations', { ...raw, sampleCost: 88 });
+    sync.enqueue(cb.id);
+    await sync.pump({ force: true });
+
+    const mine = [...fake.state.records.values()].filter((x) => x['合作ID'] === cb.id);
+    const withCost = mine.filter((x) => x['寄样费用'] != null);
+    assert.equal(withCost.length, 1, `${withCost.length} 行都写了费用，合计会虚高`);
+    assert.equal(withCost[0]['寄样费用'], 88);
+  });
+
+  test('删掉一款产品，飞书那一行也删掉，不留孤儿', async () => {
+    const items = store.findBy('collab_items', 'collaborationId', cb.id);
+    assert.equal(items.length, 2, '前提没成立');
+    store.remove('collab_items', items[1].id);
+
+    sync.enqueue(cb.id);
+    const r = await sync.pump({ force: true });
+    assert.equal(r.failed, 0, JSON.stringify(r));
+
+    const mine = [...fake.state.records.values()].filter((x) => x['合作ID'] === cb.id);
+    assert.equal(mine.length, 1, '飞书里留下了已删产品的孤儿行');
+    assert.equal(mine[0]['产品名称'], '洁齿冻干');
+  });
+
+  test('整条合作没了时，它的所有行一起清掉', async () => {
+    assert.ok([...fake.state.records.values()].some((x) => x['合作ID'] === cb.id), '前提没成立');
+    store.remove('collaborations', cb.id);
+    sync.enqueue(cb.id);
+    await sync.pump({ force: true });
+
+    const left = [...fake.state.records.values()].filter((x) => x['合作ID'] === cb.id);
+    assert.equal(left.length, 0, '合作没了，飞书里还留着行');
+    const links = store.all('sync_links').filter((l) => String(l.entityId).startsWith(cb.id + '#'));
+    assert.equal(links.length, 0, '本地映射也该清掉，否则下次还会去删已经不存在的记录');
+  });
+});
+
+/* ================================================================ */
+
+describe('字段定义与取值函数不能分叉', () => {
+  test('每一列都有取值函数，每个取值函数都有列', () => {
+    /* 两处各维护一份的话，加了列忘了加取值函数不会有任何报错，
+       只表现为「那一列永远是空的」；反过来则是「映射下拉里没有这一项」。
+       这两种现象都真实发生过（数量、合作ID、是否寄样、同步时间四个字段
+       就是这么丢的），而且都极难联想到根因。 */
+    const cols = SYSTEM_TABLE.map((w) => w.from).sort();
+    const fields = sync.SOURCE_FIELDS.map((f) => f.id).sort();
+    assert.deepEqual(fields, cols);
+    for (const f of sync.SOURCE_FIELDS) {
+      assert.equal(typeof f.get, 'function', `${f.label} 没有取值函数`);
+    }
+  });
+
+  test('列名不重复 —— 重名会让映射覆盖掉彼此', () => {
+    const names = SYSTEM_TABLE.map((w) => w.col);
+    assert.equal(new Set(names).size, names.length);
+  });
+
+  test('只用可写类型，不会定义出一个写不进去的列', () => {
+    for (const w of SYSTEM_TABLE) {
+      assert.ok(feishu.WRITABLE_TYPES.has(w.type), `${w.col} 的类型 ${w.type} 是只读的`);
+    }
   });
 });

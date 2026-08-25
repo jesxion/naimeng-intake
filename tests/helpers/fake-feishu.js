@@ -11,6 +11,7 @@
  * 全靠这些码来触发，用一个只会返回 500 的假服务是测不出来的。
  */
 import { createServer } from 'node:http';
+import { SYSTEM_TABLE } from '../../lib/feishu-schema.js';
 
 export function startFakeFeishu({ appId = 'cli_test', appSecret = 'secret_test' } = {}) {
   const state = {
@@ -18,16 +19,12 @@ export function startFakeFeishu({ appId = 'cli_test', appSecret = 'secret_test' 
       { table_id: 'tblSample', name: '达人寄样信息' },
       { table_id: 'tblOther', name: '其他表' },
     ],
-    fields: [
-      { field_id: 'f1', field_name: '系统ID', type: 1 },
-      { field_id: 'f2', field_name: '达人名称', type: 1 },
-      { field_id: 'f3', field_name: '抖音号', type: 1 },
-      { field_id: 'f4', field_name: '合作状态', type: 1 },
-      { field_id: 'f5', field_name: '寄样费用', type: 2 },
-      { field_id: 'f6', field_name: '已告知达人', type: 7 },
-      { field_id: 'f7', field_name: '建档时间', type: 5 },
-      { field_id: 'f8', field_name: '快递单号', type: 1 },
-    ],
+    /* 列表直接由 feishu-schema.js 生成 —— 假服务和真表保持同一份定义。
+       手写一份的话，加了列忘了同步到这里，测试会以「字段不存在」的形式
+       报一个和真实原因无关的错，排查方向全歪。 */
+    fields: SYSTEM_TABLE.map((w, i) => ({
+      field_id: 'f' + (i + 1), field_name: w.col, type: w.type,
+    })),
     records: new Map(),      // record_id -> fields
     seq: 0,
     tokenIssued: 0,
@@ -125,6 +122,13 @@ export function startFakeFeishu({ appId = 'cli_test', appSecret = 'secret_test' 
           const id = 'rec' + (++state.seq);
           state.records.set(id, { ...body.fields });
           return json(res, { code: 0, data: { record: { record_id: id, fields: body.fields } } });
+        }
+
+        if (tail && req.method === 'DELETE') {
+          // 照抄飞书：删一条不存在的记录返回 1254005，而不是静悄悄成功
+          if (!state.records.has(tail)) return err(res, 1254005, 'record not found');
+          state.records.delete(tail);
+          return json(res, { code: 0, data: { deleted: true, record_id: tail } });
         }
 
         if (tail && req.method === 'PUT') {
