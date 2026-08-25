@@ -222,7 +222,10 @@ describe('配置校验与自检', () => {
     const cfg = { appId: 'cli_test', appSecret: 'secret_test' };
     const good = await feishu.testConnection(cfg, 'appTokenSample', 'tblSample');
     assert.equal(good.ok, true);
-    assert.equal(good.steps.length, 3);
+    /* 断言有哪几级，而不是有几级 —— 数量是会变的（后来就加了「写入权限」一级），
+       而「这四件事都报告了」才是这个测试真正要守的东西。 */
+    assert.deepEqual(good.steps.map((s) => s.step),
+      ['凭据校验', '访问多维表格', '读取字段', '写入权限']);
     assert.ok(good.fields.some((f) => f.name === '系统ID'));
 
     const badCred = await feishu.testConnection({ appId: 'x', appSecret: 'y' }, 'appTokenSample');
@@ -311,5 +314,37 @@ describe('配置校验与自检', () => {
     await feishu.listTables({ appId: 'cli_test', appSecret: 'secret_test' }, 'appTokenSample');
     await feishu.listTables({ appId: 'cli_test', appSecret: 'secret_test' }, 'appTokenSample');
     assert.equal(fake.state.tokenIssued, before, '令牌接口有频率限制，不能每次都换');
+  });
+});
+
+/* ================================================================ */
+
+describe('权限类错误码的翻译', () => {
+  test('1254302 说清「读得到写不进」，并给出三条可执行的排查', async () => {
+    /* 这个码和 91403 是两回事：91403 是压根进不来，
+       1254302 是进来了但只能看。翻译混了会把人引到错误的方向上 ——
+       去反复确认「添加文档应用」，而真正的原因在权限范围或高级权限里。 */
+    const e = new feishu.FeishuError(1254302, 'permission denied', '/x');
+    assert.match(e.message, /只有读权限|写不了/);
+    assert.match(e.message, /发布新版本/, '漏了这条最容易踩的：改权限后不发版不生效');
+    assert.match(e.message, /高级权限/);
+    /* 和 91403 必须是两段不同的话。翻成一样的，用户会反复去确认
+       「添加文档应用」—— 而那一步早就做过了，真正的原因在权限范围里。 */
+    const p91403 = new feishu.FeishuError(91403, 'Forbidden', '/x');
+    assert.notEqual(e.message, p91403.message);
+    assert.ok(!/^没有权限。多半/.test(e.message), '不该照抄 91403 的开头');
+  });
+
+  test('测试连接不冒充验证过写入', async () => {
+    /* 曾经有个 bug 让「保存」永远显示成功而配置根本没生效。
+       同一类错误在这里的形态是：测试连接说成功，同步却一直失败 ——
+       因为测的全是读操作。所以必须显式说明写入未验证。 */
+    const r = await feishu.testConnection(
+      { appId: 'cli_test', appSecret: 'secret_test' }, 'appTokenSample', 'tblSample');
+    assert.equal(r.ok, true);
+    const w = r.steps.find((s) => s.step === '写入权限');
+    assert.ok(w, '缺少「写入权限」这一步，用户会以为测试通过就等于能写');
+    assert.match(w.detail, /未验证/);
+    assert.match(w.detail, /1254302/, '要指明失败时会看到什么码，否则这条提示没有落点');
   });
 });
