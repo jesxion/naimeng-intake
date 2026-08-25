@@ -1409,20 +1409,7 @@ async function openCollaboration(id) {
   const del = el('button', 'btn danger', '删除合作');
   del.title = mine ? '' : '只有归属商务能删';
   del.disabled = !mine;
-  del.onclick = async () => {
-    /* 两道确认。第一道说清后果，第二道要求手打达人名字 ——
-       不可逆的操作不该只隔着一次「确定」，那个按钮人是会顺手点的。 */
-    const name = cb.creatorName || '未命名达人';
-    if (!confirm(`删除这条合作，连同它的产品行、履约项、快递记录，以及飞书里对应的行。\n\n`
-      + `达人档案和录入日志保留。\n\n此操作不可恢复。继续？`)) return;
-    const typed = prompt(`确认删除请输入达人名称：${name}`);
-    if (typed === null) return;
-    if (typed.trim() !== name) { toast('名称不匹配，已取消'); return; }
-    try {
-      await api('DELETE', `/api/collaborations/${cb.id}`);
-      closeDrawer(); toast('已删除'); loadDesk(); loadRecords();
-    } catch (e) { toast(e.message); }
-  };
+  del.onclick = () => openDeleteModal(cb);
   foot.push(del);
 
   openDrawer({
@@ -1875,6 +1862,76 @@ $$('#logSeg button').forEach((b) => {
   };
 });
 $('#logMore').onclick = () => loadLogs(false);
+
+/* ---------- 删除合作 ---------- */
+
+/**
+ * 删除确认弹窗。
+ *
+ * 原来是 `confirm()` + `prompt()` 两个浏览器原生框。功能上够用，但：
+ *   · 长文案在原生框里挤成一坨，「哪些会删、哪些保留」这两句最该看清的看不清
+ *   · prompt 里要照抄的名字**不在框里**，只在标题上，得记着再敲
+ *   · Safari 连着弹两个会被当成弹窗骚扰拦掉第二个 —— 那时候第一道已经点过了
+ *
+ * 改成一个弹窗：后果列清楚，要抄的名字就摆在输入框上方，
+ * 名字对不上时删除按钮是灰的 —— **不让人点了才告诉他不行**。
+ */
+function openDeleteModal(cb) {
+  const name = cb.creatorName || '未命名达人';
+  const m = el('div', 'modal');
+  m.innerHTML = `<div class="box">
+    <h3>删除这条合作</h3>
+    <p class="sub"><b style="color:var(--red)">此操作不可恢复。</b></p>
+    <div class="alert warn" style="margin-bottom:14px">
+      <b>会一起删掉</b>
+      ${cb.items.length ? `${cb.items.length} 个产品行 · ` : ''}${cb.fulfillments.length} 个履约项${
+        cb.packages.length ? ` · ${cb.packages.length} 条快递记录` : ''}，以及飞书里对应的行。
+    </div>
+    <div class="alert" style="margin-bottom:14px">
+      <b>会保留</b>达人档案（他可能还有别的合作）和录入日志（调优提示词的语料）。
+    </div>
+    <div class="frow">
+      <label>确认请输入达人名称</label>
+      <div class="src mono" style="margin-bottom:6px;user-select:all">${esc(name)}</div>
+      <input id="dlName" autocomplete="off" spellcheck="false" placeholder="照着上面抄一遍">
+      <div class="hint" id="dlHint">名字对上之后「确认删除」才能点。</div>
+    </div>
+    <div class="acts">
+      <button class="btn" id="dlCancel">取消</button>
+      <button class="btn danger" id="dlGo" disabled>确认删除</button>
+    </div>
+  </div>`;
+  document.body.append(m);
+
+  const close = () => { m.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  m.onclick = (e) => { if (e.target === m) close(); };
+  m.querySelector('#dlCancel').onclick = close;
+
+  const inp = m.querySelector('#dlName');
+  const go = m.querySelector('#dlGo');
+  const hint = m.querySelector('#dlHint');
+
+  /* 名字对上之前按钮一直是灰的。原来是点了之后才判断、不匹配就 toast 一句 ——
+     那等于让人先把不可逆的按钮按下去，再告诉他「刚才那下不算」。 */
+  const check = () => { go.disabled = inp.value.trim() !== name; };
+  inp.oninput = check;
+  inp.onkeydown = (e) => { if (e.key === 'Enter' && !go.disabled) go.click(); };
+  setTimeout(() => inp.focus(), 30);
+
+  go.onclick = async () => {
+    if (inp.value.trim() !== name) return;   // 兜底：按钮理应是灰的
+    go.disabled = true; go.textContent = '删除中…';
+    try {
+      await api('DELETE', `/api/collaborations/${cb.id}`);
+      close(); closeDrawer(); toast('已删除'); loadDesk(); loadRecords();
+    } catch (e) {
+      go.textContent = '确认删除'; check();
+      hint.textContent = e.message; hint.style.color = 'var(--red)';
+    }
+  };
+}
 
 /* ---------- 归属转交 ---------- */
 

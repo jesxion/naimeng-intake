@@ -450,12 +450,34 @@ describe('合作详情：五张卡片', () => {
     }
   });
 
-  test('删除要两道确认，第二道得手打达人名字', () => {
-    /* 不可逆的操作不该只隔着一次「确定」—— 那个按钮人是会顺手点的。 */
-    const f = fn('openCollaboration');
-    assert.match(f, /confirm\([\s\S]{0,200}不可恢复/);
-    assert.match(f, /prompt\([\s\S]{0,80}输入达人名称/);
-    assert.match(f, /typed\.trim\(\) !== name/);
+  test('删除要手打达人名字，且走自己的弹窗不是浏览器原生框', () => {
+    /* 原生 confirm + prompt 有三个问题：长文案挤成一坨、
+       要照抄的名字不在框里（只在标题上）、Safari 会把连着弹的第二个
+       当弹窗骚扰拦掉 —— 而那时候第一道已经点过了。 */
+    const f = fn('openDeleteModal');
+    assert.match(f, /确认请输入达人名称/);
+    /* 只管删除这一条路径。「终止合作」仍用 confirm() —— 它不删数据、
+       文案一句话说得完，原生框够用。这里不一刀切禁掉整个文件的 confirm。 */
+    const del = fn('openCollaboration').match(/const del = el\([\s\S]*?foot\.push\(del\);/)[0];
+    assert.match(del, /openDeleteModal\(cb\)/);
+    assert.ok(!/\bconfirm\(|\bprompt\(/.test(del), '删除还在用浏览器原生对话框');
+    assert.ok(!/\bprompt\(/.test(f), '弹窗里又用回 prompt 了');
+  });
+
+  test('名字对不上时删除按钮是灰的，不是点了才拦', () => {
+    /* 点了之后才判断、不匹配就 toast 一句 ——
+       等于让人先把不可逆的按钮按下去，再告诉他「刚才那下不算」。 */
+    const f = fn('openDeleteModal');
+    assert.match(f, /go\.disabled = inp\.value\.trim\(\) !== name/);
+    assert.match(f, /id="dlGo" disabled/);
+  });
+
+  test('弹窗里把「删什么」和「留什么」分开列', () => {
+    // 这两句是这个弹窗存在的全部意义，不能被长文案埋掉
+    const f = fn('openDeleteModal');
+    assert.match(f, /会一起删掉/);
+    assert.match(f, /会保留/);
+    assert.match(f, /不可恢复/);
   });
 
   test('非归属人的删除按钮是禁用的，不是藏起来', () => {
