@@ -449,6 +449,127 @@ describe('外部客户端接入：Bearer 令牌与跨源', () => {
 
 /* ================================================================ */
 
+/**
+ * 插件登录（POST /api/auth/token）。
+ *
+ * 它是**匿名可访问**的，而且发的是长期凭据 —— 这两条加在一起，
+ * 是这个项目里攻击面最大的一条路由。所以边界要一条条锁死。
+ */
+describe('插件登录：口令换令牌', () => {
+  const PASS = 'naimeng-test-2026';
+  const post = (body) => api('POST', '/api/auth/token', body, '');
+
+  test('口令不对：401，而且不透露团队里有谁', async () => {
+    /* 名单在口令验过之后才给。先给名单再验口令的话，
+       这个匿名端点就成了一个免费的通讯录。 */
+    const r = await post({ passphrase: 'wrong-pass' });
+    assert.equal(r.status, 401);
+    assert.ok(!JSON.stringify(r).includes('商务甲'), '口令错了还是把名单漏出去了');
+  });
+
+  test('口令对了先给名单，不直接发令牌', async () => {
+    const r = await post({ passphrase: PASS });
+    assert.equal(r.status, 200);
+    assert.equal(r.needPick, true);
+    assert.ok(r.users.length > 0);
+    assert.equal(r.token, undefined, '还没选是谁就把令牌发了');
+  });
+
+  test('选了人才发令牌，且令牌真的能用', async () => {
+    const users = (await post({ passphrase: PASS })).users;
+    const me = users[0];
+    const r = await post({ passphrase: PASS, userId: me.id });
+    assert.equal(r.status, 200);
+    assert.match(r.token || '', /\./);
+    const ping = await api('GET', '/api/ping', null, '', { Authorization: 'Bearer ' + r.token });
+    assert.equal(ping.you, me.name, '发出来的令牌认不出人');
+  });
+
+  test('不发 cookie —— 一条路由只发一种凭据', async () => {
+    /* 这正是不给 /api/auth/login 加开关、而是新开一条路由的理由。
+       如果这里也 Set-Cookie，两种凭据又混回一处了。 */
+    const users = (await post({ passphrase: PASS })).users;
+    const res = await fetch(BASE + '/api/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passphrase: PASS, userId: users[0].id }),
+    });
+    assert.equal(res.headers.get('set-cookie'), null, '插件登录顺手种了 cookie');
+  });
+
+  test('不能凭空建人', async () => {
+    /* login 允许按姓名新建（它是人首次进系统的入口）。
+       这里不行 —— 从一个匿名端点建人，只会堆出重名和错别字。 */
+    const r = await post({ passphrase: PASS, userId: 'usr-99999' });
+    assert.equal(r.status, 400);
+    const byName = await post({ passphrase: PASS, name: '凭空冒出来的人', role: 'business' });
+    assert.equal(byName.needPick, true, '按姓名也走通了 —— 等于开了个匿名建人入口');
+  });
+
+  test('重新登录会把上一个插件令牌顶掉', async () => {
+    /* 不顶掉的话，登录十次就留下十个都还有效的 90 天凭据，
+       而且没人会记得去清。给令牌加 id 就是为了能收回来。 */
+    const users = (await post({ passphrase: PASS })).users;
+    const uid = users[users.length - 1].id;
+    const first = (await post({ passphrase: PASS, userId: uid })).token;
+    assert.equal((await api('GET', '/api/ping', null, '',
+      { Authorization: 'Bearer ' + first })).you, users[users.length - 1].name);
+
+    const second = (await post({ passphrase: PASS, userId: uid })).token;
+    assert.notEqual(first, second);
+    assert.equal((await api('GET', '/api/ping', null, '',
+      { Authorization: 'Bearer ' + first })).you, null, '旧令牌还活着');
+    assert.equal((await api('GET', '/api/ping', null, '',
+      { Authorization: 'Bearer ' + second })).you, users[users.length - 1].name);
+  });
+
+  test('顶掉的只是自己的插件令牌，不碰别人、也不碰手签的', async () => {
+    const a = await loginAs(BASE, { name: '插件甲' });
+    const b = await loginAs(BASE, { name: '插件乙' });
+    // 甲手签一个（kind=manual），甲和乙各登录一次插件
+    const manual = (await api('POST', '/api/tokens', { name: '甲的脚本' }, a.cookie)).token;
+    await post({ passphrase: PASS, userId: a.me.id });
+    const yiPlugin = (await post({ passphrase: PASS, userId: b.me.id })).token;
+
+    // 甲再登录一次插件
+    await post({ passphrase: PASS, userId: a.me.id });
+
+    assert.equal((await api('GET', '/api/ping', null, '',
+      { Authorization: 'Bearer ' + manual })).you, '插件甲', '把手签的令牌一起清掉了');
+    assert.equal((await api('GET', '/api/ping', null, '',
+      { Authorization: 'Bearer ' + yiPlugin })).you, '插件乙', '清掉了别人的令牌');
+  });
+
+  test('插件令牌一样不能当 cookie 用', async () => {
+    const users = (await post({ passphrase: PASS })).users;
+    const t = (await post({ passphrase: PASS, userId: users[0].id })).token;
+    assert.equal((await api('GET', '/api/collaborations', null,
+      `naimeng_session=${t}`)).status, 401);
+  });
+
+  test('插件令牌比手签的短得多', async () => {
+    /* 手签的令牌放在服务器上，插件令牌落在浏览器存储里 ——
+       同样是长期凭据，暴露面不是一个量级。 */
+    const users = (await post({ passphrase: PASS })).users;
+    const r = await post({ passphrase: PASS, userId: users[0].id });
+
+    /* 第一版这里只断言了 r.expiresInDays —— 那是**响应里自报的数字**，
+       和令牌里真正烤进去的 exp 是两回事。把签发改成默认 10 年，
+       响应照样报 90，测试照样绿。变异测试当场抓到。
+
+       所以拆开令牌看 exp。又一次同一个坑：**断言标签 ≠ 断言行为**。 */
+    const payload = JSON.parse(Buffer.from(r.token.split('.')[0], 'base64url').toString());
+    const days = (payload.exp - Date.now()) / 864e5;
+    assert.ok(Math.abs(days - auth.PLUGIN_TOKEN_DAYS) < 1,
+      `令牌实际有效期是 ${Math.round(days)} 天，不是 ${auth.PLUGIN_TOKEN_DAYS} 天`);
+    assert.equal(r.expiresInDays, auth.PLUGIN_TOKEN_DAYS, '响应自报的天数和令牌里的对不上');
+    assert.ok(auth.PLUGIN_TOKEN_DAYS < auth.API_TOKEN_DAYS / 10,
+      '插件令牌的有效期没有明显短于手签令牌');
+  });
+});
+
+/* ================================================================ */
+
 describe('跨源白名单', () => {
   let cookie;
   before(async () => { cookie = (await loginAs(BASE, { name: '跨源甲' })).cookie; });

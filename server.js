@@ -19,6 +19,7 @@ import * as db from './lib/db.js';
 import {
   COOKIE_NAME, parseCookies, readSession, issueSession, sessionCookie, clearCookie,
   hashPassphrase, verifyPassphrase, issueApiToken, readApiToken, bearerOf,
+  PLUGIN_TOKEN_DAYS,
 } from './lib/auth.js';
 import * as feishu from './lib/feishu.js';
 import * as sync from './lib/sync.js';
@@ -61,6 +62,9 @@ const OPEN_ROUTES = new Set([
   '/api/auth/bootstrap',
   '/api/auth/login',
   '/api/auth/logout',
+  /* 插件的登录入口。和 /api/auth/login 一样，它**本身就是**用来
+     从「还没有身份」走到「有身份」的，所以必须开放。 */
+  '/api/auth/token',
 ]);
 
 /* -------------------------------------------------------------- 工具 */
@@ -562,6 +566,48 @@ const routes = {
   },
 
   'POST /api/auth/logout': async () => ({ ok: true, _setCookie: clearCookie() }),
+
+  /**
+   * 插件登录：口令 + 选自己是谁 → 换一个 API 令牌。
+   *
+   * 为什么不给 /api/auth/login 加个 `wantToken` 开关：
+   * **一条路由发两种凭据，调用点上早晚有人看错。**
+   * 「web 会话和 API 令牌不能互换」这条约束在 auth.js 的 `k` 字段上
+   * 专门花了力气，不该在路由层重新混起来。
+   *
+   * 为什么插件不能直接用 cookie：同源也没用 —— SameSite 看的是顶层站点
+   * （feishu.cn），插件那个 iframe 里发出去的请求算跨站。
+   * 这条是实测出来的，见 docs/飞书插件-可达性验证.md。
+   */
+  'POST /api/auth/token': async (req) => {
+    const s = await db.getSettings();
+    if (!s.auth?.passphrase) throw httpError(409, '还没初始化，请先在系统里设置团队口令');
+    const b = await readBody(req);
+    if (!verifyPassphrase(b.passphrase, s.auth.passphrase)) throw httpError(401, '团队口令不对');
+
+    const users = (await db.listUsers()).map((u) => ({ id: u.id, name: u.name, role: u.role }));
+    // 第一段：口令对了才给名单，和 login 一样 —— 口令没验过之前不泄露团队成员姓名
+    if (!b.userId) return { ok: true, needPick: true, users };
+
+    const me = users.find((u) => u.id === b.userId);
+    if (!me) throw httpError(400, '选择的成员不存在');
+
+    /* 和 login 有意不同：**不按姓名新建人**。
+       login 那样做是因为它是人首次进系统的入口；而这里是插件在用，
+       从一个匿名端点凭空建人，只会在名单里堆出重名和错别字。
+       名单里没有就先去系统里加。 */
+
+    // 同一个人重登录，先把上一个插件令牌作废 —— 见 db.revokeApiTokensOf
+    await db.revokeApiTokensOf(me.id, 'plugin');
+    const rec = await db.addApiToken({ name: `插件 · ${me.name}`, userId: me.id, kind: 'plugin' });
+    return {
+      ok: true,
+      me,
+      token: issueApiToken(me.id, rec.id, PLUGIN_TOKEN_DAYS),
+      expiresInDays: PLUGIN_TOKEN_DAYS,
+      _audit: `插件登录 · ${me.name}`,
+    };
+  },
 
   'PUT /api/settings': async (req) => {
     const patch = await readBody(req);
