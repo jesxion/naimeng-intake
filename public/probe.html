@@ -200,7 +200,16 @@ const STEPS = [
       if (sameOrigin) {
         return {
           ok: true, detail: '同源，不涉及 CORS',
-          verdict: { kind: 'ok', text: '页面和系统同源 —— **这是最理想的情况**，CORS 和 SameSite 两个问题都不存在。' },
+          /* 原来这里写的是「CORS 和 SameSite 两个问题都不存在」。
+             **同一次运行里的第 2 步就否掉了后半句**：匿名请求回 you: null，
+             说明会话 cookie 根本没带上。
+             原因是 SameSite 看的是**顶层站点**，不是 iframe 自己的源 ——
+             顶层是 feishu.cn，所以这个 iframe 里发出去的请求算跨站。
+             同源解决的只有 CORS。 */
+          verdict: { kind: 'ok', text:
+            '页面和系统同源 —— **CORS 不涉及**，白名单不用配。'
+            + '\n\n但**会话 cookie 仍然带不上**：SameSite 看的是顶层站点（feishu.cn），'
+            + '不是这个 iframe 自己的源。上一步 `you: null` 就是证据。所以插件必须走令牌。' },
         };
       }
       try {
