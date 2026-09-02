@@ -463,6 +463,7 @@ tbody tr:hover{background:#fbfcff}
       <button data-panel="vision">视觉模型</button>
       <button data-panel="products">寄样产品</button>
       <button data-panel="feishu">飞书同步</button>
+      <button data-panel="external">外部接入</button>
       <button data-panel="logs">运行日志</button>
       <button data-panel="workflow">流程设置</button>
       <div class="navnote" id="setupNote" style="display:none">首次使用请先填写我的资料，否则无法录入。</div>
@@ -479,6 +480,47 @@ tbody tr:hover{background:#fbfcff}
           <div class="frow"><label>联系电话</label><input id="uPhone" placeholder="选填"></div>
         </div>
         <div class="sfoot"><button class="btn primary" id="saveUser">保存</button><span class="muted" id="userMsg"></span></div>
+      </div>
+
+      <div class="spanel" id="sp-external">
+        <h3>外部接入</h3>
+        <p>给飞书插件、MCP、脚本这类<b>非浏览器客户端</b>用。它们用不了会话 cookie
+          —— 跨站请求不会带上，而改成 <code>SameSite=None</code> 又强制要求 HTTPS。
+          所以走 <code>Authorization: Bearer</code> 令牌。</p>
+
+        <div class="alert" style="margin-bottom:14px">
+          <b>先跑探针</b>不确定飞书插件能不能连上这台机器时，
+          用 <a href="/probe.html" target="_blank" rel="noreferrer">/probe.html</a> 测一遍
+          —— 它会把「托管 / 网络 / CORS / 鉴权」分成四步分别回答。
+        </div>
+
+        <div class="rh">跨源白名单</div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 8px">
+          只有列在这里的源能跨源访问。<b>留空 = 完全不允许跨源</b>，这是默认。
+          跨源一律不带 cookie，只认令牌 —— 所以 CSRF 面是零。</p>
+        <div class="frow">
+          <label>允许的源（一行一个）</label>
+          <textarea id="corsList" rows="3" class="mono"
+            style="width:100%;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:12.5px/1.6 ui-monospace,Menlo,monospace"
+            placeholder="https://xxx.feishu.cn"></textarea>
+          <div class="hint">只填协议+域名+端口，别带路径 —— 带了会被自动截掉。</div>
+        </div>
+        <div class="sfoot"><button class="btn primary" id="saveCors">保存白名单</button>
+          <span class="muted" id="corsMsg"></span></div>
+
+        <div class="rh" style="margin-top:20px">API 令牌</div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 8px">
+          <b>令牌明文只在签发那一次显示</b>，系统里只存 id 和使用记录。
+          丢了就吊销重发 —— 这比在磁盘上留一份明文安全。</p>
+        <div id="tokenList"></div>
+        <div class="frow2" style="margin-top:10px">
+          <div class="frow"><label>用途备注</label>
+            <input id="tokName" placeholder="如：飞书多维表格插件"></div>
+          <div class="frow" style="display:flex;align-items:flex-end">
+            <button class="btn primary" id="mkToken">签发新令牌</button></div>
+        </div>
+        <div id="tokOut"></div>
+        <div class="sfoot"><span class="muted" id="tokMsg"></span></div>
       </div>
 
       <div class="spanel" id="sp-logs">

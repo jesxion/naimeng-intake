@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>飞书插件可达性探针 · 耐萌</title>
+<!--
+  这个页面的唯一任务：把「插件能不能用」拆成四个能分别回答的问题，
+  并且在每一步失败时说清**那意味着什么**。
+
+  为什么需要它：不做拆分的话，插件里只会看到一个笼统的失败，
+  而那个失败可能是托管、网络、CORS、鉴权里的任何一个 ——
+  四种原因的解法完全不同，猜错方向能浪费掉好几天。
+
+  刻意零依赖、单文件、不要构建：它要能被丢到任何地方托管，
+  包括飞书要求的 HTTPS 域名下。
+-->
+<style>
+  :root{--ink:#16202b;--dim:#6b7785;--line:#e3e8ee;--soft:#f6f8fa;
+        --green:#1a7f4b;--red:#c0392b;--amber:#b7791f;--blue:#1a5fb4}
+  *{box-sizing:border-box}
+  body{margin:0;padding:18px;background:#fff;color:var(--ink);
+       font:14px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  h1{margin:0 0 4px;font-size:17px}
+  .sub{color:var(--dim);font-size:12.5px;margin-bottom:16px}
+  .row{border:1px solid var(--line);border-radius:9px;padding:12px 14px;margin-bottom:10px}
+  .row h2{margin:0 0 6px;font-size:13.5px;display:flex;align-items:center;gap:8px}
+  .pill{flex:none;font-size:11.5px;padding:1px 9px;border-radius:99px;background:var(--soft);color:var(--dim)}
+  .pill.ok{background:#e6f4ec;color:var(--green)}
+  .pill.bad{background:#fdecea;color:var(--red)}
+  .pill.warn{background:#fdf3e0;color:var(--amber)}
+  .what{font-size:12.5px;color:var(--dim)}
+  .out{margin-top:8px;padding:8px 10px;background:var(--soft);border-radius:6px;
+       font:11.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+       white-space:pre-wrap;word-break:break-all;max-height:150px;overflow:auto}
+  .verdict{margin-top:8px;padding:9px 11px;border-radius:6px;font-size:12.8px;
+           border-left:3px solid var(--line);background:var(--soft)}
+  .verdict.bad{border-left-color:var(--red)}
+  .verdict.ok{border-left-color:var(--green)}
+  .verdict.warn{border-left-color:var(--amber)}
+  label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
+  input{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;
+        font:12.8px/1.5 ui-monospace,Menlo,monospace}
+  button{padding:8px 16px;border:1px solid var(--line);border-radius:7px;background:#fff;
+         font:13px inherit;cursor:pointer}
+  button.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  button:disabled{opacity:.5;cursor:default}
+  .acts{display:flex;gap:8px;margin:14px 0}
+  .env{font-size:11.5px;color:var(--dim);margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+  .env code{background:var(--soft);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+
+<h1>飞书插件可达性探针</h1>
+<div class="sub">四步，前一步不过就不用看后一步。每一步都会说清失败意味着什么。</div>
+
+<label>系统地址（Mac mini 的局域网地址）</label>
+<input id="base" placeholder="http://192.168.1.20:5173">
+
+<label>API 令牌（第 4 步才用，先留空也行）</label>
+<input id="tok" placeholder="设置 → 外部接入 里签发">
+
+<div class="acts">
+  <button class="primary" id="run">开始检测</button>
+  <button id="copy">复制结果</button>
+</div>
+
+<div id="steps"></div>
+
+<div class="env">
+  当前页面：<code id="here"></code><br>
+  飞书 SDK：<code id="sdk"></code>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+$('#here').textContent = location.origin;
+/* 飞书插件跑起来时会注入 @lark-base-open/js-sdk。这里只做存在性检测 ——
+   探针不依赖它，但能不能拿到它决定了「这是不是真的跑在插件容器里」。 */
+$('#sdk').textContent = (window.bitable || window.__LARK_BASE__)
+  ? '已注入（确实在插件容器里）' : '未注入（可能只是普通网页）';
+
+const STEPS = [
+  {
+    id: 'host', title: '1 · 页面能被加载',
+    what: '你现在能看到这个页面，这一步就过了。',
+    async run() {
+      const https = location.protocol === 'https:';
+      return {
+        ok: true,
+        detail: `协议 ${location.protocol}｜源 ${location.origin}`,
+        verdict: https
+          ? { kind: 'warn', text: '页面是 HTTPS。**接下来调 http:// 的局域网地址会被浏览器按混合内容拦掉** —— 第 2 步大概率失败，那不是网络问题。' }
+          : { kind: 'ok', text: '页面是 HTTP，和系统同协议，不会有混合内容问题。' },
+      };
+    },
+  },
+  {
+    id: 'reach', title: '2 · 能不能连上系统（匿名）',
+    what: '打 /api/ping。这一步只问网络，不问身份。',
+    async run(base) {
+      try {
+        const r = await fetch(base + '/api/ping', { method: 'GET' });
+        const j = await r.json();
+        return {
+          ok: r.ok,
+          detail: JSON.stringify(j, null, 2),
+          verdict: { kind: 'ok', text: '网络通了。后面的失败都不再是网络问题。' },
+        };
+      } catch (e) {
+        const mixed = location.protocol === 'https:' && base.startsWith('http:');
+        return {
+          ok: false,
+          detail: String(e),
+          verdict: mixed
+            ? { kind: 'bad', text: '**混合内容拦截**：HTTPS 页面不许发 HTTP 请求。解法只有两条 —— 给系统上 HTTPS，或者把插件也托管在 HTTP 上（飞书多半不允许）。' }
+            : { kind: 'bad', text: '连不上。先确认这台机器和 Mac mini 在同一网段、地址端口没写错、防火墙放行了 node。浏览器直接打开这个地址能不能出页面？' },
+        };
+      }
+    },
+  },
+  {
+    id: 'cors', title: '3 · 跨源放行了吗',
+    what: '看 /api/ping 返回里的 corsAllowed。跨源时浏览器要求服务端显式放行。',
+    async run(base) {
+      const sameOrigin = base.replace(/\/+$/, '') === location.origin;
+      if (sameOrigin) {
+        return {
+          ok: true, detail: '同源，不涉及 CORS',
+          verdict: { kind: 'ok', text: '页面和系统同源 —— **这是最理想的情况**，CORS 和 SameSite 两个问题都不存在。' },
+        };
+      }
+      try {
+        const r = await fetch(base + '/api/ping');
+        const j = await r.json();
+        return {
+          ok: Boolean(j.corsAllowed),
+          detail: `corsAllowed = ${j.corsAllowed}\n当前源 = ${location.origin}`,
+          verdict: j.corsAllowed
+            ? { kind: 'ok', text: '这个源已经在白名单里。' }
+            : { kind: 'warn', text: `请求能发出去，但服务端没放行这个源。去「设置 → 外部接入」把 ${location.origin} 加进白名单。` },
+        };
+      } catch (e) {
+        return {
+          ok: false, detail: String(e),
+          verdict: { kind: 'bad', text: '被浏览器拦在 CORS 上 —— 说明**网络其实是通的**，只是服务端没发放行头。把上面那个源加进白名单再试。' },
+        };
+      }
+    },
+  },
+  {
+    id: 'auth', title: '4 · 带令牌能不能认出身份',
+    what: '带 Authorization: Bearer。跨源用不了 cookie，只能走令牌。',
+    async run(base, tok) {
+      if (!tok) {
+        return { ok: null, detail: '（没填令牌，跳过）',
+          verdict: { kind: 'warn', text: '填一个令牌再测这一步。令牌在「设置 → 外部接入」里签发。' } };
+      }
+      try {
+        const r = await fetch(base + '/api/ping', { headers: { Authorization: 'Bearer ' + tok } });
+        const j = await r.json();
+        return {
+          ok: Boolean(j.you),
+          detail: JSON.stringify(j, null, 2),
+          verdict: j.you
+            ? { kind: 'ok', text: `认出来了：${j.you}。**四步全过，插件方案成立。**` }
+            : { kind: 'bad', text: '请求通了但没认出身份 —— 令牌错了、过期了，或者已经被吊销。' },
+        };
+      } catch (e) {
+        return { ok: false, detail: String(e),
+          verdict: { kind: 'bad', text: '带上 Authorization 头之后请求失败了。多半是预检（OPTIONS）没过 —— 检查白名单。' } };
+      }
+    },
+  },
+];
+
+function card(step, state, res) {
+  const pill = state === 'run' ? '<span class="pill">检测中…</span>'
+    : res.ok === true ? '<span class="pill ok">通过</span>'
+    : res.ok === null ? '<span class="pill warn">跳过</span>'
+    : '<span class="pill bad">失败</span>';
+  return `<div class="row">
+    <h2>${esc(step.title)} ${pill}</h2>
+    <div class="what">${esc(step.what)}</div>
+    ${res.detail ? `<div class="out">${esc(res.detail)}</div>` : ''}
+    ${res.verdict ? `<div class="verdict ${res.verdict.kind}">${
+      esc(res.verdict.text).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>` : ''}
+  </div>`;
+}
+
+let lastReport = '';
+
+$('#run').onclick = async () => {
+  const base = $('#base').value.trim().replace(/\/+$/, '');
+  const tok = $('#tok').value.trim();
+  if (!base) { alert('先填系统地址'); return; }
+  try { localStorage.setItem('probeBase', base); } catch { /* 无痕模式下会抛 */ }
+
+  $('#run').disabled = true;
+  const box = $('#steps');
+  box.innerHTML = '';
+  const lines = [`探针报告 ${new Date().toISOString()}`, `页面源 ${location.origin}`, `目标 ${base}`, ''];
+
+  for (const step of STEPS) {
+    const el = document.createElement('div');
+    el.innerHTML = card(step, 'run', {});
+    box.append(el);
+    let res;
+    try { res = await step.run(base, tok); }
+    catch (e) { res = { ok: false, detail: String(e), verdict: { kind: 'bad', text: '探针本身出错了。' } }; }
+    el.innerHTML = card(step, 'done', res);
+    lines.push(`[${res.ok === true ? '通过' : res.ok === null ? '跳过' : '失败'}] ${step.title}`);
+    if (res.detail) lines.push('  ' + String(res.detail).replace(/\n/g, '\n  '));
+    if (res.verdict) lines.push('  → ' + res.verdict.text.replace(/\*\*/g, ''));
+    lines.push('');
+    /* 第 2 步不过就停 —— 后面每一步都以网络通为前提，
+       继续跑只会产生一串误导性的失败。 */
+    if (step.id === 'reach' && !res.ok) {
+      box.insertAdjacentHTML('beforeend',
+        '<div class="verdict bad"><b>在这里停下。</b>后面三步都以「网络通」为前提，'
+        + '继续跑只会得到一串看不出根因的失败。</div>');
+      lines.push('（第 2 步失败，后续步骤未执行）');
+      break;
+    }
+  }
+  lastReport = lines.join('\n');
+  $('#run').disabled = false;
+};
+
+$('#copy').onclick = async () => {
+  if (!lastReport) { alert('先跑一次检测'); return; }
+  try { await navigator.clipboard.writeText(lastReport); $('#copy').textContent = '已复制'; }
+  catch { alert(lastReport); }
+  setTimeout(() => { $('#copy').textContent = '复制结果'; }, 1500);
+};
+
+try {
+  const saved = localStorage.getItem('probeBase');
+  if (saved) $('#base').value = saved;
+  else if (location.protocol === 'http:') $('#base').value = location.origin;
+} catch { /* ignore */ }
+</script>
+</body>
+</html>

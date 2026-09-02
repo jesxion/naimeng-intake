@@ -24,6 +24,9 @@ for (const k of ['LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY']) delete process.env
 
 const { server } = await import('../server.js');
 const { makeApi, bootstrap, loginAs } = await import('./helpers/login.js');
+/* 同一个 NAIMENG_DATA_DIR，所以和被测服务共用签名密钥 ——
+   可以在这里造出「签名合法但类型不对」的令牌，那是 HTTP 层构造不出来的。 */
+const auth = await import('../lib/auth.js');
 
 let BASE, api, JIA, YI, prod;
 
@@ -376,5 +379,163 @@ describe('原始识别记录也要拦归属', () => {
   test('合作不存在时是 404，不是空数组', async () => {
     const a = await loginAs(BASE, { name: '原文甲' });
     assert.equal((await api('GET', '/api/collaborations/cb-99999/logs', null, a.cookie)).status, 404);
+  });
+});
+
+/* ================================================================ */
+
+describe('外部客户端接入：Bearer 令牌与跨源', () => {
+  let cookie, token, tokenId;
+
+  test('签发的明文只在那一次响应里出现', async () => {
+    /* 库里只存 id 和元信息。存明文等于把长期凭据落在 settings.json 里，
+       而那个文件出问题时人是会直接打开看的。 */
+    const a = await loginAs(BASE, { name: '令牌甲' });
+    cookie = a.cookie;
+    const made = await api('POST', '/api/tokens', { name: '飞书插件' }, cookie);
+    assert.equal(made.status, 200);
+    assert.match(made.token, /\./, '没返回令牌');
+    token = made.token;
+    tokenId = made.record.id;
+
+    const list = (await api('GET', '/api/tokens', null, cookie)).tokens;
+    const rec = list.find((t) => t.id === tokenId);
+    assert.ok(rec, '清单里没有这条');
+    assert.ok(!JSON.stringify(rec).includes(token), '令牌明文被存进了清单');
+  });
+
+  test('Bearer 能认出身份，也能读业务数据', async () => {
+    const ping = await api('GET', '/api/ping', null, '', { Authorization: 'Bearer ' + token });
+    assert.equal(ping.you, '令牌甲');
+    assert.equal((await api('GET', '/api/collaborations', null, '',
+      { Authorization: 'Bearer ' + token })).status, 200);
+  });
+
+  test('会话 cookie 不能当 Bearer 用，反之亦然', async () => {
+    /* 两者生命周期和吊销方式完全不同。能互换的话，
+       一个泄漏的长期令牌就等于一个永久 cookie。 */
+    const sess = cookie.replace(/^[^=]+=/, '');
+    const r = await api('GET', '/api/ping', null, '', { Authorization: 'Bearer ' + sess });
+    assert.equal(r.you, null, '会话 cookie 被当成 API 令牌接受了');
+  });
+
+  test('吊销之后立刻失效', async () => {
+    /* 纯 HMAC 无状态方案吊销不了单个令牌 —— 所以 payload 里带 token id，
+       清单里删掉那一条就失效。「发出去的凭据收不回来」是不能接受的。 */
+    assert.equal((await api('GET', '/api/collaborations', null, '',
+      { Authorization: 'Bearer ' + token })).status, 200);
+    assert.equal((await api('DELETE', `/api/tokens/${tokenId}`, null, cookie)).status, 200);
+    assert.equal((await api('GET', '/api/collaborations', null, '',
+      { Authorization: 'Bearer ' + token })).status, 401);
+  });
+
+  test('未登录不能签发或吊销令牌', async () => {
+    assert.equal((await api('POST', '/api/tokens', { name: 'x' }, '')).status, 401);
+    assert.equal((await api('DELETE', '/api/tokens/at-00001', null, '')).status, 401);
+  });
+
+  test('/api/ping 匿名可访问，但不泄漏任何业务数据', async () => {
+    /* 它存在的唯一目的是让「网络通不通」和「凭据对不对」变成两个
+       能分开回答的问题。所以必须匿名 —— 也因此必须什么都不带。 */
+    const r = await api('GET', '/api/ping', null, '');
+    assert.equal(r.status, 200);
+    assert.equal(r.you, null);
+    const blob = JSON.stringify(r);
+    for (const leak of ['passphrase', 'apiKey', 'appSecret', 'creator', 'phone']) {
+      assert.ok(!blob.includes(leak), `ping 里带出了 ${leak}`);
+    }
+  });
+});
+
+/* ================================================================ */
+
+describe('跨源白名单', () => {
+  let cookie;
+  before(async () => { cookie = (await loginAs(BASE, { name: '跨源甲' })).cookie; });
+
+  test('默认不允许任何跨源', async () => {
+    await api('PUT', '/api/settings', { cors: { origins: [] } }, cookie);
+    const r = await fetch(BASE + '/api/ping', { headers: { Origin: 'https://x.feishu.cn' } });
+    assert.equal(r.headers.get('access-control-allow-origin'), null);
+  });
+
+  test('预检在鉴权之前答复', async () => {
+    /* 浏览器发 OPTIONS 时不带 Authorization。挡在 401 里的话真正的请求
+       根本发不出去，而现象是「CORS 报错」—— 完全看不出是鉴权顺序的问题。 */
+    await api('PUT', '/api/settings', { cors: { origins: ['https://x.feishu.cn'] } }, cookie);
+    const r = await fetch(BASE + '/api/collaborations',
+      { method: 'OPTIONS', headers: { Origin: 'https://x.feishu.cn' } });
+    assert.equal(r.status, 204, '预检没过');
+    assert.equal(r.headers.get('access-control-allow-origin'), 'https://x.feishu.cn');
+  });
+
+  test('回显 Origin 时必须带 Vary，否则会被缓存串源', async () => {
+    const r = await fetch(BASE + '/api/ping', { headers: { Origin: 'https://x.feishu.cn' } });
+    assert.match(r.headers.get('vary') || '', /Origin/);
+  });
+
+  test('**不开 Allow-Credentials** —— 跨源只认令牌不认 cookie', async () => {
+    /* 开了它，跨源请求就会自动带 cookie，那是环境权限，也就是 CSRF 的根源。
+       显式令牌不是环境权限，所以跨源那条路的 CSRF 面是零。 */
+    const r = await fetch(BASE + '/api/ping', { headers: { Origin: 'https://x.feishu.cn' } });
+    assert.equal(r.headers.get('access-control-allow-credentials'), null);
+  });
+
+  test('不在白名单里的源一律拒', async () => {
+    const r = await fetch(BASE + '/api/ping', { method: 'OPTIONS', headers: { Origin: 'https://evil.com' } });
+    assert.equal(r.status, 403);
+    assert.equal(r.headers.get('access-control-allow-origin'), null);
+  });
+
+  test('保存时把 URL 归一成纯 origin', async () => {
+    /* CORS 比对的是源不是 URL。存了带路径的值只会在比对时永远不匹配，
+       现象像「白名单配了没生效」，极难往「多了段路径」上想。 */
+    await api('PUT', '/api/settings', { cors: { origins: ['https://y.feishu.cn/base/xxx?a=1'] } }, cookie);
+    const got = (await api('GET', '/api/config', null, cookie)).settings.cors.origins;
+    assert.deepEqual(got, ['https://y.feishu.cn']);
+  });
+
+  test('认不出来的写法直接丢掉，不入库', async () => {
+    await api('PUT', '/api/settings', { cors: { origins: ['不是网址', 'ftp://x.com', ''] } }, cookie);
+    assert.deepEqual((await api('GET', '/api/config', null, cookie)).settings.cors.origins, []);
+  });
+});
+
+
+/* ================================================================ */
+
+describe('两种凭据严格分家', () => {
+  /* 上一轮变异验证有两条没红，都在这个方向上：
+     「不校验令牌类型」和「API 令牌能当 cookie 用」。
+     HTTP 层造不出「签名合法但 k 不对」的串，所以这一组直接调 auth 模块。 */
+
+  test('web 会话不能被当成 API 令牌 —— 哪怕它带了 token id', async () => {
+    /* 只靠「有没有 t 字段」来区分是不够的：那是巧合，不是判据。
+       真正的判据是 k。这条测试专门喂一个 k='web' 但有 t 的串。 */
+    const fake = auth.issueApiToken('u-00001', 'at-00001').split('.')[0];
+    const payload = JSON.parse(Buffer.from(fake, 'base64url').toString('utf8'));
+    const web = Buffer.from(JSON.stringify({ ...payload, k: 'web' })).toString('base64url');
+    const signed = auth.issueApiToken('x', 'y');           // 借它的签名函数形状
+    assert.ok(signed);
+    // 用真实密钥重新签一个 k='web' 的
+    const crypto = await import('node:crypto');
+    const mac = crypto.createHmac('sha256', auth.sessionSecret()).update(web).digest('base64url');
+    const hit = await auth.readApiToken(`${web}.${mac}`, async () => true);
+    assert.equal(hit, null, 'k=web 的串被当成 API 令牌接受了');
+  });
+
+  test('API 令牌不能被当成会话 cookie', async () => {
+    const tok = auth.issueApiToken('u-00001', 'at-00001');
+    assert.equal(auth.readSession(tok), null, 'API 令牌被 readSession 接受了');
+  });
+
+  test('走 HTTP 也一样：拿 API 令牌当 cookie 塞进去，401', async () => {
+    const a = await loginAs(BASE, { name: '混用甲' });
+    const made = await api('POST', '/api/tokens', { name: '混用测试' }, a.cookie);
+    const asCookie = `naimeng_session=${made.token}`;
+    assert.equal((await api('GET', '/api/collaborations', null, asCookie)).status, 401);
+    // 而正常当 Bearer 用是通的 —— 说明失败不是因为令牌本身坏了
+    assert.equal((await api('GET', '/api/collaborations', null, '',
+      { Authorization: 'Bearer ' + made.token })).status, 200);
   });
 });

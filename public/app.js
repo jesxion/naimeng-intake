@@ -1754,6 +1754,81 @@ async function openLogsModal(collaborationId, title) {
   </div>`).join('');
 }
 
+/* ================================================================ 外部接入 */
+
+async function loadExternal() {
+  try {
+    const cfg = await api('GET', '/api/config');
+    $('#corsList').value = (cfg.settings.cors?.origins || []).join('\n');
+  } catch { /* 拿不到就留空，保存时会覆盖 */ }
+  await loadTokens();
+}
+
+async function loadTokens() {
+  const box = $('#tokenList');
+  let list = [];
+  try { list = (await api('GET', '/api/tokens')).tokens; }
+  catch (e) { box.innerHTML = `<div class="alert warn"><b>读取失败</b>${esc(e.message)}</div>`; return; }
+
+  if (!list.length) { box.innerHTML = '<div class="dim">还没有签发过令牌</div>'; return; }
+  box.innerHTML = '';
+  list.forEach((t) => {
+    const row = el('div');
+    row.style.cssText = 'display:flex;align-items:baseline;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)';
+    row.innerHTML = `<b style="flex:none">${esc(t.name)}</b>`
+      + `<span class="mono dim" style="font-size:11.5px">${esc(t.id)}</span>`
+      + `<span class="dim" style="font-size:12px">签发 ${esc(fmtDate(t.createdAt))}</span>`
+      /* 「上次使用」是判断「这个令牌还有人在用吗」的唯一依据 ——
+         吊销前应该先看这个，否则会掐掉还在跑的东西。 */
+      + `<span class="dim" style="font-size:12px;margin-left:auto">${
+        t.lastUsedAt ? '最近用过 ' + esc(daysAgo(t.lastUsedAt)) : '<i>从未使用</i>'}</span>`;
+    const rm = el('button', 'btn sm danger', '吊销');
+    rm.style.marginLeft = '10px';
+    rm.onclick = async () => {
+      if (!confirm(`吊销「${t.name}」？用它的客户端会立刻开始报 401。`)) return;
+      try { await api('DELETE', '/api/tokens/' + t.id); msg('#tokMsg', '已吊销'); loadTokens(); }
+      catch (e) { msg('#tokMsg', e.message, false); }
+    };
+    row.append(rm);
+    box.append(row);
+  });
+}
+
+$('#saveCors').onclick = async () => {
+  const origins = $('#corsList').value.split('\n').map((x) => x.trim()).filter(Boolean);
+  try {
+    await api('PUT', '/api/settings', { cors: { origins } });
+    await refreshConfig();
+    await loadExternal();   // 回读，让被归一化掉的写法当场可见
+    msg('#corsMsg', origins.length ? `已保存 ${origins.length} 个源` : '已清空 —— 跨源全部关闭');
+  } catch (e) { msg('#corsMsg', e.message, false); }
+};
+
+$('#mkToken').onclick = async () => {
+  const name = $('#tokName').value.trim();
+  if (!name) { msg('#tokMsg', '填一下用途，将来才知道这个令牌是给谁的', false); return; }
+  try {
+    const r = await api('POST', '/api/tokens', { name });
+    $('#tokName').value = '';
+    /* 明文只此一次。所以这里不能只 toast 一句就完 ——
+       要把它显眼地摆出来，并说清关掉就没了。 */
+    const out = $('#tokOut');
+    out.innerHTML = '';
+    const box = el('div', 'alert warn');
+    box.style.marginTop = '10px';
+    box.innerHTML = `<b>令牌只显示这一次</b>关掉设置页就再也拿不到了，现在就复制走。`;
+    const code = el('div', 'src mono');
+    code.style.cssText = 'margin-top:8px;user-select:all;word-break:break-all;font-size:12px';
+    code.textContent = r.token;
+    const cp = el('button', 'btn sm primary', '复制令牌');
+    cp.style.marginTop = '8px';
+    cp.onclick = async () => toast(await copy(r.token) ? '已复制' : '复制失败');
+    box.append(code, cp);
+    out.append(box);
+    loadTokens();
+  } catch (e) { msg('#tokMsg', e.message, false); }
+};
+
 /* ================================================================ 运行日志 */
 
 let LOG = { kind: 'ops', offset: 0 };
@@ -2225,6 +2300,7 @@ function switchPanel(name) {
   $$('.spanel').forEach((p) => p.classList.toggle('on', p.id === 'sp-' + name));
   if (name === 'feishu') loadFeishu();   // 每次进来重新拉状态，队列数要是实时的
   if (name === 'logs') loadLogs(true);   // 同理，日志要是刚发生的那些
+  if (name === 'external') loadExternal();
 }
 $('#openSettings').onclick = () => openSettings();
 $('#closeSettings').onclick = () => { $('#settings').classList.remove('on'); };

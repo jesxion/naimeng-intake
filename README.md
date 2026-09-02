@@ -681,7 +681,7 @@ data/backups/           启动时自动备份，保留最近 7 份
 ## 测试
 
 ```bash
-npm test           # node --test，367 个用例，零依赖
+npm test           # node --test，383 个用例，零依赖
 ```
 
 | 文件 | 用例 | 覆盖 |
@@ -690,7 +690,7 @@ npm test           # node --test，367 个用例，零依赖
 | `feishu.test.js` | 49 | 飞书同步：打在本地假服务上，不碰真实凭据和公司的表 |
 | `ui.test.js` | 81 | 前端不变量（对源码断言，挡住结构回退） |
 | `db.test.js` | 36 | 数据层 + v1→v2 迁移 + 合作类型与初始状态 |
-| `authz.test.js` | 38 | 登录、会话伪造、归属边界、我的资料只能改自己、删除权限、**原文可见性** |
+| `authz.test.js` | 54 | 登录、会话伪造、归属边界、我的资料只能改自己、删除权限、**原文可见性** |
 | `store.test.js` | 24 | SQLite 存储层 + 导入对账 |
 | `api.test.js` | 32 | HTTP 端到端 + 写操作自动留痕 + 原图接口 |
 | `agent.test.js` | 15 | 降级路径 + **隐私扫描** |
@@ -772,6 +772,14 @@ npm test           # node --test，367 个用例，零依赖
 | GET | `/api/logs/ops` · `/api/logs/errors` | 操作日志 / 错误日志，支持按人、按对象、只看失败 |
 | GET | `/api/shots/:id` | 发货截图原图（二进制，要求登录） |
 
+外部客户端接入（飞书插件 / MCP / 脚本）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/ping` | **匿名可访问**的探针，回 `{ok, you, corsAllowed}` |
+| GET/POST | `/api/tokens` | 列出 / 签发 API 令牌（明文只返回一次） |
+| DELETE | `/api/tokens/:id` | 吊销，立刻失效 |
+
 飞书同步：
 
 | 方法 | 路径 | 说明 |
@@ -797,6 +805,26 @@ npm test           # node --test，367 个用例，零依赖
 | 身份 | HMAC 签名的 HttpOnly cookie，有效期写在载荷里**参与签名** |
 | 名单保护 | 口令验过之前不返回团队成员姓名 |
 | 踢人下线 | 删掉 `data/.session-secret` 重启，所有会话立刻失效 |
+
+### 两种凭据，一个入口
+
+`userOf(req)` 认两种：浏览器的会话 cookie，和外部客户端的
+`Authorization: Bearer` 令牌。**「身份只有一个入口」那条规则没破。**
+
+加 Bearer 是因为跨源客户端（飞书插件、MCP）**用不了 cookie**：
+`SameSite=Lax` 跨站不带，改成 `None` 又强制要求 `Secure`，
+而 `Secure` 在明文 http 上不回传 —— 只要系统还在局域网 http 上，这就是死结。
+
+刻意分成两种而不是放宽 cookie：**令牌不是环境权限**，必须显式带上，
+所以跨源那条路的 CSRF 面是零。这也是 CORS 刻意**不开 `Allow-Credentials`** 的原因。
+
+| | 保证 |
+|---|---|
+| 类型隔离 | payload 带 `k`，web 会话和 API 令牌**不能互换** |
+| 可吊销 | payload 带 token id，清单里删掉就立刻失效 |
+| 不留明文 | 签发时只返回一次，库里只存 id 和使用记录 |
+| 跨源白名单 | 默认为空 = 全关；回显 Origin 时带 `Vary` |
+| 预检在鉴权前 | OPTIONS 不带 Authorization，挡在 401 里真正的请求发不出去 |
 
 **身份必须由服务端签发，不能让前端自报。** 早先版本把 userId 存在 localStorage
 再塞进 `X-User-Id` 请求头 —— 改个请求头就能变成任何人，那些按归属拦截的 403 形同虚设。

@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import * as db from './lib/db.js';
 import {
   COOKIE_NAME, parseCookies, readSession, issueSession, sessionCookie, clearCookie,
-  hashPassphrase, verifyPassphrase,
+  hashPassphrase, verifyPassphrase, issueApiToken, readApiToken, bearerOf,
 } from './lib/auth.js';
 import * as feishu from './lib/feishu.js';
 import * as sync from './lib/sync.js';
@@ -54,6 +54,9 @@ const HOST = process.env.HOST || '127.0.0.1';
 
 /** 无需会话即可访问的接口。除此之外全部拦住。 */
 const OPEN_ROUTES = new Set([
+  /* 探针。刻意匿名可访问 —— 它的作用就是在「还没搞定鉴权」的阶段
+     回答「网络通不通」。它不泄漏任何业务数据。 */
+  '/api/ping',
   '/api/auth/state',
   '/api/auth/bootstrap',
   '/api/auth/login',
@@ -107,10 +110,56 @@ function httpError(status, message, extra = {}) {
  * 现在读服务端签发的会话 cookie，签名密钥只在服务器上。
  */
 const userOf = async (req) => {
-  const token = parseCookies(req.headers.cookie)[COOKIE_NAME];
-  const uid = readSession(token);
+  /* 两种凭据，一个入口。加 Bearer 是因为跨源客户端（飞书插件、MCP）
+     **用不了 cookie**：SameSite=Lax 跨站不带，改 None 又强制要 Secure，
+     而 Secure 在明文 http 上不回传 —— 死结。
+
+     刻意分成两种而不是放宽 cookie：Bearer 不是环境权限，必须显式带上，
+     所以跨源那条路的 CSRF 面是零。 */
+  const bearer = bearerOf(req.headers.authorization);
+  if (bearer) {
+    const hit = await readApiToken(bearer, (id) => db.isApiTokenLive(id));
+    if (!hit) return null;
+    db.touchApiToken(hit.tokenId).catch(() => {});   // 尽力而为，不阻塞
+    return db.currentUser(hit.userId);
+  }
+  const uid = readSession(parseCookies(req.headers.cookie)[COOKIE_NAME]);
   return uid ? db.currentUser(uid) : null;
 };
+
+/* ================================================================ CORS */
+
+/**
+ * 跨源放行。**白名单，且不开 Allow-Credentials。**
+ *
+ * 不开凭据意味着跨源请求带不上 cookie，只能走 Bearer ——
+ * 这正是想要的：环境权限（cookie 自动带）是 CSRF 的根源，
+ * 而显式令牌不是。默认白名单为空，等于跨源全关。
+ */
+/* 探针要在「可能一切都没配好」的前提下回答问题，所以这两个包装
+   把异常吞掉。放在具名函数里而不是写成链式 await —— 那种写法
+   `await a().b()` 的求值顺序容易看错，仓库里有条测试专门禁它。 */
+async function whoAmIQuietly(req) {
+  try { return (await userOf(req))?.name || null; } catch { return null; }
+}
+async function corsQuietly(req) {
+  try { return await corsHeadersFor(req); } catch { return null; }
+}
+
+async function corsHeadersFor(req) {
+  const origin = req.headers.origin;
+  if (!origin) return null;                     // 同源请求没有 Origin 头
+  const s = await db.getSettings();
+  if (!(s.cors?.origins || []).includes(origin)) return null;
+  return {
+    'Access-Control-Allow-Origin': origin,
+    /* 回显 Origin 时必须带 Vary，否则中间层可能把 A 站的响应缓存给 B 站。 */
+    Vary: 'Origin',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Max-Age': '600',
+  };
+}
 
 async function requireUser(req) {
   const u = await userOf(req);
@@ -346,6 +395,7 @@ const routes = {
           fromEnv: !s.model.baseUrl && Boolean(process.env.LLM_BASE_URL) },
         vision: { provider: s.vision.provider, baseUrl: s.vision.baseUrl, model: s.vision.model,
           apiStyle: s.vision.apiStyle, hasApiKey: Boolean(s.vision.apiKey), apiKeyMasked: mask(s.vision.apiKey) },
+        cors: { origins: [...(s.cors?.origins || [])] },
         followUp: { ...s.followUp },
         notifyTemplate: s.notifyTemplate,
       },
@@ -980,6 +1030,50 @@ const routes = {
     return { _raw: shot.buffer, _mime: shot.mime };
   },
 
+  /* ---------- 外部客户端接入（飞书插件 / MCP）---------- */
+
+  /**
+   * 探针专用：不需要任何凭据就能答的一条。
+   *
+   * 它存在的唯一目的是让「网络到底通不通」和「凭据对不对」变成
+   * **两个能分开回答的问题**。少了它，插件那边只会看到一个笼统的失败，
+   * 而那个失败可能是网络、CORS、鉴权里的任何一个。
+   */
+  'GET /api/ping': async (req) => ({
+    ok: true,
+    service: 'naimeng-intake',
+    time: new Date().toISOString(),
+    /* 带上「你这次请求被认成谁了」—— 匿名就是 null。
+       这样一条请求同时回答了可达性和鉴权两件事。 */
+    you: await whoAmIQuietly(req),
+    corsAllowed: Boolean(await corsQuietly(req)),
+  }),
+
+  'GET /api/tokens': async (req) => {
+    await requireUser(req);
+    return { tokens: await db.listApiTokens() };
+  },
+
+  /* 签发的明文**只在这一次响应里出现**，之后再也拿不到 ——
+     库里只存 id 和元信息。丢了就吊销重发，这比留一份明文在磁盘上安全。 */
+  'POST /api/tokens': async (req) => {
+    const me = await requireUser(req);
+    const b = await readBody(req);
+    const rec = await db.addApiToken({ name: b.name, userId: me.id });
+    return {
+      token: issueApiToken(me.id, rec.id),
+      record: rec,
+      _audit: `签发 API 令牌 · ${rec.name}`,
+      note: '这串令牌只显示这一次，请立刻复制保存',
+    };
+  },
+
+  'DELETE /api/tokens/:id': async (req, p) => {
+    await requireUser(req);
+    if (!await db.revokeApiToken(p.id)) throw httpError(404, '令牌不存在或已吊销');
+    return { ok: true, _audit: `吊销 API 令牌 ${p.id}` };
+  },
+
   /* ---------- 日志 ---------- */
 
   /* 日志对全员可见。6 个人同处一间办公室，互相知道对方做了什么是常态；
@@ -1060,8 +1154,15 @@ export const server = createServer(async (req, res) => {
   const pathname = url.pathname;
 
   if (pathname.startsWith('/api/')) {
+    const cors = await corsQuietly(req);
+    /* 预检必须在鉴权之前答复：浏览器发 OPTIONS 时不会带 Authorization，
+       挡在 401 里的话真正的请求根本发不出去，而现象是「CORS 报错」，
+       完全看不出是鉴权顺序的问题。 */
+    if (req.method === 'OPTIONS') {
+      return send(res, cors ? 204 : 403, '', cors || {});
+    }
     const hit = match(req.method, pathname);
-    if (!hit) return send(res, 404, { error: '接口不存在' });
+    if (!hit) return send(res, 404, { error: '接口不存在' }, cors || {});
     const started = Date.now();
     /* 所有非 GET 请求都会留一条操作日志。**在这里记，不在各个路由里记** ——
        指望每个路由都记得调一次，迟早漏掉新加的那个，
@@ -1100,6 +1201,7 @@ export const server = createServer(async (req, res) => {
          路由统一返回对象、由这一层落到响应，是这套代码的既有约定。 */
       if (out && out._raw) {
         return send(res, 200, out._raw, {
+          ...(cors || {}),
           'Content-Type': out._mime || 'application/octet-stream',
           'Cache-Control': 'private, max-age=86400',
         });
@@ -1107,13 +1209,13 @@ export const server = createServer(async (req, res) => {
       // 处理器想种/清 cookie 时通过 _setCookie 传出来，不直接碰 res
       if (out && out._setCookie) {
         const { _setCookie, _audit, ...body } = out;
-        return send(res, 200, body, { 'Set-Cookie': _setCookie });
+        return send(res, 200, body, { ...(cors || {}), 'Set-Cookie': _setCookie });
       }
       if (out && out._audit !== undefined) {
         const { _audit, ...body } = out;
-        return send(res, 200, body);
+        return send(res, 200, body, cors || {});
       }
-      return send(res, 200, out);
+      return send(res, 200, out, cors || {});
     } catch (e) {
       const status = e.status || 500;
       /* 4xx 是「用户做错了」，不是故障 —— 记进操作日志（ok=false）就够，
@@ -1131,7 +1233,7 @@ export const server = createServer(async (req, res) => {
           summary: e.message || '',
         });
       }
-      return send(res, status, { error: e.message || '服务器错误', ...(e.extra || {}) });
+      return send(res, status, { error: e.message || '服务器错误', ...(e.extra || {}) }, cors || {});
     }
   }
 

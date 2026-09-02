@@ -22,8 +22,10 @@ const grabCookie = (res) => {
  */
 export function makeApi(base) {
   let jar = '';
-  const api = async (method, path, body, cookie) => {
-    const headers = { 'Content-Type': 'application/json' };
+  /* 第五个参数是额外请求头 —— 外部客户端走 Authorization: Bearer，
+     不走 cookie，所以测试也得能发那条路径上的请求。 */
+  const api = async (method, path, body, cookie, extraHeaders) => {
+    const headers = { 'Content-Type': 'application/json', ...(extraHeaders || {}) };
     const c = cookie === undefined ? jar : cookie;
     if (c) headers.Cookie = c;
     const res = await fetch(base + path, {
