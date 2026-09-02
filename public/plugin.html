@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>耐萌 · 达人录入</title>
+<!--
+  飞书多维表格边栏插件。第一版只做**达人建档**这一条链：
+  粘贴 → 识别 → 查重 → 入库。
+
+  为什么只做这一条：查重是插件相对「让商务直接在表格里敲」的
+  唯一不可替代的能力。飞书那张表的「重复检测」是事后公式 ——
+  人已经敲完一整行了；插件能在识别完的那一刻就拦住。
+  快递和出片两条复用同样的骨架，但先让一个人真用一周再说。
+
+  刻意零依赖、单文件、不要构建。页面由系统自己托管，
+  所以和 API **同源**，base 就是 location.origin，不用配。
+
+  身份走 Authorization: Bearer，不走 cookie。同源也没用 ——
+  SameSite 看的是顶层站点（feishu.cn），这个 iframe 里发出去的
+  请求算跨站。实测见 docs/飞书插件-可达性验证.md。
+-->
+<style>
+  :root{--ink:#16202b;--dim:#6b7785;--line:#e3e8ee;--soft:#f6f8fa;--soft2:#eef2f6;
+        --green:#1a7f4b;--red:#c0392b;--amber:#b7791f;--blue:#1a5fb4}
+  *{box-sizing:border-box}
+  body{margin:0;padding:14px;background:#fff;color:var(--ink);
+       font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  h1{margin:0 0 2px;font-size:16px}
+  .sub{color:var(--dim);font-size:12.5px;margin-bottom:14px}
+  label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
+  input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--line);
+       border-radius:6px;font:13.5px/1.5 inherit;background:#fff;color:var(--ink)}
+  textarea{min-height:130px;resize:vertical;font-family:inherit}
+  button{padding:8px 15px;border:1px solid var(--line);border-radius:7px;background:#fff;
+         font:13.5px inherit;cursor:pointer;color:var(--ink)}
+  button.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  button:disabled{opacity:.45;cursor:default}
+  .acts{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+  .card{border:1px solid var(--line);border-radius:9px;padding:11px 13px;margin-top:12px}
+  .card h2{margin:0 0 7px;font-size:13px;color:var(--dim);font-weight:600}
+  .kv{display:flex;gap:8px;font-size:13px;padding:2px 0}
+  .kv b{flex:none;width:66px;color:var(--dim);font-weight:400}
+  .note{padding:9px 11px;border-radius:6px;font-size:12.8px;border-left:3px solid var(--line);
+        background:var(--soft);margin-top:10px}
+  .note.bad{border-left-color:var(--red);background:#fdecea}
+  .note.ok{border-left-color:var(--green);background:#e9f5ee}
+  .note.warn{border-left-color:var(--amber);background:#fdf5e6}
+  .who{display:flex;justify-content:space-between;align-items:center;
+       font-size:12px;color:var(--dim);border-bottom:1px solid var(--line);
+       padding-bottom:8px;margin-bottom:10px}
+  .who button{padding:3px 9px;font-size:11.5px}
+  .row2{display:flex;gap:8px}
+  .row2>*{flex:1;min-width:0}
+  .acct{font-size:12.8px;padding:5px 0;border-top:1px dashed var(--line)}
+  .acct:first-child{border-top:0}
+  .muted{color:var(--dim)}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);
+        border-top-color:var(--ink);border-radius:50%;animation:s .7s linear infinite;
+        vertical-align:-1px;margin-right:5px}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/* ---------------------------------------------------------------- 凭据 */
+
+/* 令牌落在第三方 iframe 的分区存储里。探针第 5 步验过它跨会话活着，
+   但**不能假定它一定能用** —— 用户屏蔽第三方 cookie 时浏览器会连
+   localStorage 一起拒绝，直接抛。所以读写都包起来，取不到就当没登录，
+   最坏情况是每次开插件重输一次口令，而不是白屏。 */
+const KEY = 'naimeng.plugin.token';
+const store = {
+  get() { try { return localStorage.getItem(KEY) || ''; } catch { return ''; } },
+  set(v) { try { localStorage.setItem(KEY, v); } catch { /* 存不住就只在本次会话里用 */ } },
+  clear() { try { localStorage.removeItem(KEY); } catch { /* 同上 */ } },
+};
+
+const S = {
+  token: store.get(),
+  me: null,
+  view: 'boot',        // boot | login | intake
+  users: [],
+  products: [],
+  job: null,           // 识别任务
+  form: null,          // 识别出来的表单，可编辑
+  dup: null,           // 查重命中
+  msg: null,           // { kind, text }
+  busy: false,
+};
+
+/* ---------------------------------------------------------------- API */
+
+/**
+ * 所有请求都从这里走。
+ *
+ * 401 一律当作「令牌没了」处理：清掉并回登录页。
+ * 不这么做的话，令牌过期（90 天）那天商务看到的会是一连串
+ * 「请先登录」的红字，而页面还停在录入界面上 —— 没人猜得到要重登。
+ */
+async function api(method, path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (S.token) headers.Authorization = 'Bearer ' + S.token;
+  const res = await fetch(location.origin + path, {
+    method, headers, body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && S.view !== 'login') {
+    S.token = ''; store.clear(); S.me = null; S.view = 'login';
+    S.msg = { kind: 'warn', text: '登录已过期，请重新输入团队口令。' };
+    render();
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) throw new Error(data.error || `请求失败（${res.status}）`);
+  return data;
+}
+
+/* ---------------------------------------------------------------- 启动 */
+
+async function boot() {
+  if (!S.token) { S.view = 'login'; return render(); }
+  try {
+    const r = await api('GET', '/api/ping');
+    /* ping 是匿名可访问的，所以「200」不代表令牌有效 ——
+       要看它认没认出人。只判 res.ok 的话，一个废令牌会一路放行到
+       第一次真正提交时才报错。 */
+    if (!r.you) throw new Error('令牌无效');
+    S.me = { name: r.you };
+    S.view = 'intake';
+    render();
+    loadProducts();
+  } catch {
+    S.token = ''; store.clear();
+    S.view = 'login';
+    render();
+  }
+}
+
+async function loadProducts() {
+  try { S.products = (await api('GET', '/api/products')).products || []; render(); }
+  catch { /* 产品拉不到不该挡住录入，提交时会有校验 */ }
+}
+
+/* ---------------------------------------------------------------- 登录 */
+
+async function doLogin(ev) {
+  ev?.preventDefault();
+  const pass = $('#pass').value;
+  const userId = $('#who')?.value || '';
+  if (!pass) return;
+  S.busy = true; S.msg = null; render();
+  try {
+    const r = await api('POST', '/api/auth/token', { passphrase: pass, userId: userId || undefined });
+    if (r.needPick) {
+      S.users = r.users;
+      S.msg = { kind: 'ok', text: '口令对了，选一下你是谁。' };
+    } else {
+      S.token = r.token; store.set(r.token);
+      S.me = r.me;
+      S.view = 'intake';
+      S.msg = { kind: 'ok', text: `已登录：${r.me.name}。${r.expiresInDays} 天内不用再输。` };
+      loadProducts();
+    }
+  } catch (e) {
+    S.msg = { kind: 'bad', text: e.message };
+  } finally {
+    S.busy = false; render();
+    /* 重渲染会重建输入框，口令得填回去 —— 否则选完人一提交，
+       口令是空的，看起来像「选了人没反应」。 */
+    if ($('#pass')) $('#pass').value = pass;
+  }
+}
+
+function logout() {
+  S.token = ''; store.clear(); S.me = null; S.users = [];
+  S.job = null; S.form = null; S.dup = null;
+  S.view = 'login'; S.msg = null;
+  render();
+}
+
+/* ---------------------------------------------------------------- 识别 */
+
+async function recognize() {
+  const text = $('#raw').value.trim();
+  if (!text) { S.msg = { kind: 'warn', text: '先把微信里的资料粘进来。' }; return render(); }
+  S.busy = true; S.msg = null; S.form = null; S.dup = null; render();
+  try {
+    const { job } = await api('POST', '/api/jobs', { rawText: text });
+    S.job = job;
+    await poll(job.id);
+  } catch (e) {
+    S.msg = { kind: 'bad', text: e.message };
+  } finally { S.busy = false; render(); }
+}
+
+/**
+ * 轮询识别结果。
+ *
+ * 没有 WebSocket，也不打算加 —— 识别通常几秒钟，一个人一次只跑一条。
+ * 但**必须有上限**：模型不通时任务会一直 pending，没有上限的话
+ * 页面会转到天荒地老，而商务只会觉得「这东西卡死了」。
+ */
+async function poll(jobId, tries = 60) {
+  for (let i = 0; i < tries; i++) {
+    await new Promise((r) => setTimeout(r, 1200));
+    const { jobs } = await api('GET', '/api/jobs');
+    const j = (jobs || []).find((x) => x.id === jobId);
+    if (!j) throw new Error('识别任务不见了，请重试');
+    if (j.status === 'error') throw new Error(j.error || '识别失败');
+    if (j.status === 'done') {
+      S.job = j;
+      S.form = j.result?.form || null;
+      S.dup = j.summary?.dupInDb || null;
+      if (!S.form) throw new Error('识别完了但没抽出内容，检查一下粘贴的资料');
+      /* 识别出来的类型可能是空的。默认按寄样走 —— 不寄样是少数情况，
+         而默认成不寄样会让「漏填地址」这件事悄悄通过校验。 */
+      if (!S.form.type) S.form.type = '寄样合作';
+      if (!S.form.items?.length) S.form.items = [{ productId: '', quantity: 1 }];
+      return;
+    }
+  }
+  throw new Error('识别超时。到系统的「工作台」看看这条任务卡在哪了。');
+}
+
+/* ---------------------------------------------------------------- 提交 */
+
+const NEEDS_SAMPLE = (t) => t === '寄样合作';
+
+async function submit() {
+  const f = S.form;
+  f.name = $('#f-name').value.trim();
+  f.type = $('#f-type').value;
+  f.recipient = {
+    name: $('#f-rname').value.trim(),
+    phone: $('#f-rphone').value.trim(),
+    address: $('#f-raddr').value.trim(),
+  };
+  f.sampleCost = $('#f-cost').value.trim();
+  if (NEEDS_SAMPLE(f.type)) {
+    f.items = [{ productId: $('#f-prod').value, quantity: Number($('#f-qty').value) || 0 }];
+  } else {
+    /* 不寄样的合作把产品清空，而不是留着上一次选的 ——
+       留着的话它会跟着提交进去，然后仓库那边看到一条「不寄样但有产品」。 */
+    f.items = [];
+  }
+
+  S.busy = true; S.msg = null; render();
+  try {
+    const r = await api('POST', '/api/collaborations', {
+      form: f, action: 'submitSample',
+      jobId: S.job?.id, rawText: S.job?.rawText || '',
+      extracted: S.job?.result?.form || null,
+      model: S.job?.result?.model, mode: S.job?.result?.mode,
+    });
+    S.job = null; S.form = null; S.dup = null;
+    S.msg = {
+      kind: 'ok',
+      text: `已建档：${r.creator?.name || ''}（${r.collaboration?.id}）`
+        + (r.soft?.length ? `\n提醒：${r.soft.join('；')}` : ''),
+    };
+  } catch (e) {
+    S.msg = { kind: 'bad', text: e.message };
+  } finally { S.busy = false; render(); }
+}
+
+/* ---------------------------------------------------------------- 渲染 */
+
+function note(m) {
+  return m ? `<div class="note ${m.kind}">${esc(m.text).replace(/\n/g, '<br>')}</div>` : '';
+}
+
+function loginView() {
+  const picking = S.users.length > 0;
+  return `
+    <h1>耐萌 · 达人录入</h1>
+    <div class="sub">先用团队口令登录。${S.token ? '' : '登录一次可以管 90 天。'}</div>
+    <form id="loginForm">
+      <label>团队口令</label>
+      <input id="pass" type="password" autocomplete="current-password" placeholder="和系统登录用的是同一个">
+      ${picking ? `<label>你是谁</label><select id="who">${
+        S.users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('')
+      }</select>` : ''}
+      <div class="acts">
+        <button class="primary" type="submit" ${S.busy ? 'disabled' : ''}>
+          ${S.busy ? '<span class="spin"></span>' : ''}${picking ? '进入' : '下一步'}
+        </button>
+      </div>
+    </form>
+    ${note(S.msg)}`;
+}
+
+function dupBanner() {
+  if (!S.dup) return '';
+  /* 这段是插件存在的第一个理由。飞书那张表的「重复检测」列是事后公式 ——
+     人已经把一整行敲完了才知道；这里在识别完的那一刻就说清楚，
+     而且能说出**归属谁、合作过几次**，那是比字符串比不出来的。 */
+  return `<div class="note bad">
+    <b>这个账号已经建过档了。</b><br>
+    达人：${esc(S.dup.creatorName || '')}　归属：${esc(S.dup.owner || '未知')}
+    已合作 ${Number(S.dup.collaborationCount) || 0} 次<br>
+    命中：<code>${esc(S.dup.key || '')}</code><br><br>
+    不要重复建档。要给这个达人发起新的一次合作，请到系统里从这位达人下面发起 ——
+    在这里提交会被服务端拒绝。
+  </div>`;
+}
+
+function formView() {
+  const f = S.form;
+  const needs = NEEDS_SAMPLE(f.type);
+  const accounts = (f.accounts || []).filter((a) => a.douyinId || a.uid || a.nickname);
+  const r = f.recipient || {};
+  return `
+    <div class="card">
+      <h2>识别到的账号（${accounts.length}）</h2>
+      ${accounts.length ? accounts.map((a) => `<div class="acct">
+        <b>${esc(a.nickname || '（无昵称）')}</b>
+        <span class="muted"> ${esc(a.douyinId || a.uid || '')}</span>
+        ${a.cooperationCode ? '' : '<span class="muted"> · 无合作码</span>'}
+      </div>`).join('') : '<div class="muted" style="font-size:12.5px">一个都没识别到 —— 提交会被拒。</div>'}
+    </div>
+    ${dupBanner()}
+
+    <label>达人名称</label>
+    <input id="f-name" value="${esc(f.name || '')}">
+
+    <label>合作类型</label>
+    <select id="f-type" onchange="onTypeChange(this.value)">
+      ${['寄样合作', '不寄样合作', '直播定向'].map((t) =>
+        `<option ${t === f.type ? 'selected' : ''}>${t}</option>`).join('')}
+    </select>
+
+    <div id="sampleBlock" style="${needs ? '' : 'display:none'}">
+      <label>收件人</label>
+      <div class="row2">
+        <input id="f-rname" placeholder="姓名" value="${esc(r.name || '')}">
+        <input id="f-rphone" placeholder="手机号" value="${esc(r.phone || '')}">
+      </div>
+      <label>收件地址</label>
+      <textarea id="f-raddr" style="min-height:56px">${esc(r.address || '')}</textarea>
+
+      <label>寄样产品</label>
+      <div class="row2">
+        <select id="f-prod">
+          <option value="">选择产品</option>
+          ${S.products.map((p) => `<option value="${esc(p.id)}" ${
+            p.id === f.items?.[0]?.productId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select>
+        <input id="f-qty" type="number" min="1" style="max-width:72px"
+               value="${Number(f.items?.[0]?.quantity) || 1}">
+      </div>
+
+      <label>寄样费用（选填）</label>
+      <input id="f-cost" value="${esc(f.sampleCost ?? '')}">
+    </div>
+    <!-- 不寄样时 sampleBlock 只是 display:none，字段还在 DOM 里。
+         这里**不能**再补一份隐藏字段 —— 那会造出重复的 id，
+         而 querySelector 只返回第一个，submit() 读到的就可能是另一份。 -->
+
+    <div class="acts">
+      <button class="primary" onclick="submit()" ${S.busy || S.dup ? 'disabled' : ''}>
+        ${S.busy ? '<span class="spin"></span>' : ''}提交建档
+      </button>
+      <button onclick="discard()">重来</button>
+    </div>`;
+}
+
+function intakeView() {
+  return `
+    <div class="who">
+      <span>${esc(S.me?.name || '')}</span>
+      <button onclick="logout()">退出</button>
+    </div>
+    ${S.form ? '' : `
+      <label>把微信里的资料整段粘进来</label>
+      <textarea id="raw" placeholder="昵称、抖音号、收件人、地址、寄样产品…… 顺序无所谓，能粘多少粘多少"></textarea>
+      <div class="acts">
+        <button class="primary" onclick="recognize()" ${S.busy ? 'disabled' : ''}>
+          ${S.busy ? '<span class="spin"></span>识别中…' : '识别'}
+        </button>
+      </div>`}
+    ${S.form ? formView() : ''}
+    ${note(S.msg)}`;
+}
+
+function render() {
+  $('#app').innerHTML = S.view === 'login' ? loginView()
+    : S.view === 'intake' ? intakeView()
+    : '<div class="muted">连接中…</div>';
+  const lf = $('#loginForm');
+  if (lf) { lf.onsubmit = doLogin; $('#pass')?.focus(); }
+}
+
+/* 类型切换只显隐，不重渲染 —— 重渲染会把已经改过的收件人清回识别值，
+   而人往往是先改了地址再发现类型选错的。 */
+window.onTypeChange = (v) => {
+  S.form.type = v;
+  const b = $('#sampleBlock');
+  if (b) b.style.display = NEEDS_SAMPLE(v) ? '' : 'none';
+};
+window.discard = () => { S.job = null; S.form = null; S.dup = null; S.msg = null; render(); };
+window.recognize = recognize;
+window.submit = submit;
+window.logout = logout;
+
+boot();
+</script>
+</body>
+</html>
