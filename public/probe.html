@@ -54,6 +54,10 @@
 
 <h1>飞书插件可达性探针</h1>
 <div class="sub">四步，前一步不过就不用看后一步。每一步都会说清失败意味着什么。</div>
+<div class="verdict warn" style="margin-bottom:14px">
+  <b>必须在飞书插件里打开这个页面。</b>直接用浏览器打开测不出任何东西 ——
+  那时候页面和系统同源、cookie 正常带上，四步会全绿，但和插件能不能用毫无关系。
+</div>
 
 <label>系统地址（Mac mini 的局域网地址）</label>
 <input id="base" placeholder="http://192.168.1.20:5173">
@@ -86,17 +90,45 @@ $('#sdk').textContent = (window.bitable || window.__LARK_BASE__)
 
 const STEPS = [
   {
-    id: 'host', title: '1 · 页面能被加载',
-    what: '你现在能看到这个页面，这一步就过了。',
+    id: 'host', title: '1 · 真的跑在飞书插件里吗',
+    what: '这一步不是问「页面出没出来」—— 在普通浏览器里打开它当然出得来。要问的是「飞书愿不愿意加载它」。',
     async run() {
-      const https = location.protocol === 'https:';
-      return {
-        ok: true,
-        detail: `协议 ${location.protocol}｜源 ${location.origin}`,
-        verdict: https
-          ? { kind: 'warn', text: '页面是 HTTPS。**接下来调 http:// 的局域网地址会被浏览器按混合内容拦掉** —— 第 2 步大概率失败，那不是网络问题。' }
-          : { kind: 'ok', text: '页面是 HTTP，和系统同协议，不会有混合内容问题。' },
-      };
+      /* 第一版这里写的是「你现在能看到这个页面，这一步就过了」。
+         那句话在普通浏览器里也成立 —— 于是它给了一个假的通过，
+         而后面三步全部基于一个错误的前提。
+
+         **一个在错误情况下也会通过的检查，等于没有检查。**
+         现在改成硬判据：不在插件容器里就直接判无效。 */
+      const hasSdk = Boolean(window.bitable || window.__LARK_BASE__);
+      const framed = window.self !== window.top;
+      const ua = navigator.userAgent;
+      const larkUA = /Lark|Feishu/i.test(ua);
+      const inContainer = hasSdk || (framed && larkUA);
+
+      const detail = [
+        `源            ${location.origin}`,
+        `bitable SDK   ${hasSdk ? '已注入' : '未注入'}`,
+        `在 iframe 里  ${framed ? '是' : '否'}`,
+        `UA 含飞书标识  ${larkUA ? '是' : '否'}`,
+      ].join('\n');
+
+      if (!inContainer) {
+        return {
+          ok: false, detail,
+          verdict: { kind: 'bad', text:
+            '**这不是在飞书插件里跑的。** 页面直接在浏览器里打开时，后面三步全部不作数 —— '
+            + '同源、带 cookie、没有 CORS，那是系统本来就成立的情形，和插件能不能用无关。'
+            + '\n\n要验证的是：把这个页面**注册成飞书多维表格插件**，在飞书里打开它。' },
+        };
+      }
+      if (location.protocol === 'https:') {
+        return { ok: true, detail,
+          verdict: { kind: 'warn', text:
+            '在插件容器里，页面是 HTTPS。**接下来调 http:// 的局域网地址会被按混合内容拦掉** —— '
+            + '第 2 步失败的话那不是网络问题。' } };
+      }
+      return { ok: true, detail,
+        verdict: { kind: 'ok', text: '在插件容器里，且页面是 HTTP —— 和系统同协议，没有混合内容问题。' } };
     },
   },
   {
@@ -219,6 +251,13 @@ $('#run').onclick = async () => {
     lines.push('');
     /* 第 2 步不过就停 —— 后面每一步都以网络通为前提，
        继续跑只会产生一串误导性的失败。 */
+    if (step.id === 'host' && !res.ok) {
+      box.insertAdjacentHTML('beforeend',
+        '<div class="verdict bad"><b>在这里停下。</b>不在插件容器里，后面三步测的是另一回事 ——'
+        + '继续跑只会得到一份看起来全绿、实际什么都没验证的报告。</div>');
+      lines.push('（第 1 步失败：不在插件容器里，后续步骤未执行）');
+      break;
+    }
     if (step.id === 'reach' && !res.ok) {
       box.insertAdjacentHTML('beforeend',
         '<div class="verdict bad"><b>在这里停下。</b>后面三步都以「网络通」为前提，'
