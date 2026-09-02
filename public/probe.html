@@ -83,52 +83,89 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
   (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
 $('#here').textContent = location.origin;
-/* 飞书插件跑起来时会注入 @lark-base-open/js-sdk。这里只做存在性检测 ——
-   探针不依赖它，但能不能拿到它决定了「这是不是真的跑在插件容器里」。 */
+/* @lark-base-open/js-sdk 是 npm 包，要页面自己 import —— 容器**不会**注入它。
+   所以「未注入」完全不能说明不在插件里。这里只作为参考信息显示。 */
 $('#sdk').textContent = (window.bitable || window.__LARK_BASE__)
-  ? '已注入（确实在插件容器里）' : '未注入（可能只是普通网页）';
+  ? '已注入（页面自己引了 SDK）' : '未注入（本页没引 SDK，属正常）';
+
+/* 判定「是不是跑在飞书插件容器里」用的三个证据，从强到弱：
+   1. ancestorOrigins —— 父级 frame 的源，浏览器给的，页面伪造不了
+   2. document.referrer —— 父文档地址；referrer policy 可能只留 origin，够用
+   3. UA 含 Lark/Feishu —— 只有飞书**客户端**里才有；在浏览器里开飞书网页版没有
+   顶层窗口（不在 iframe 里）一票否决：插件一定是嵌进去的。 */
+function containerEvidence() {
+  const framed = window.self !== window.top;
+  let ancestors = [];
+  try { ancestors = Array.from(location.ancestorOrigins || []); } catch { /* 不支持就空着 */ }
+  const ref = document.referrer || '';
+  /* 前面允许 `/` 是因为要匹配 `https://feishu.cn` 这种**裸域名**的源 ——
+     只写 `(^|\.)` 的话它匹配不上（前面是斜杠）。
+     但也不能不限定，否则 `notfeishu.cn` 会误命中。 */
+  const LARK = /(^|[./])(feishu|larksuite|larkoffice|feishucdn)\.(cn|com|net)\b/i;
+  const byAncestor = ancestors.some((o) => LARK.test(o));
+  const byReferrer = LARK.test(ref);
+  const byUA = /Lark|Feishu/i.test(navigator.userAgent);
+  const hasSdk = Boolean(window.bitable || window.__LARK_BASE__);
+  return {
+    framed, ancestors, ref, byAncestor, byReferrer, byUA, hasSdk,
+    /* 在 iframe 里 + 任何一条指向飞书，就认。
+       只有 framed 而拿不到任何飞书痕迹时，判「说不准」而不是「不是」——
+       ancestorOrigins 有浏览器不支持，referrer 有可能被策略清空。 */
+    verdict: !framed ? 'no'
+      : (hasSdk || byAncestor || byReferrer || byUA) ? 'yes' : 'unsure',
+  };
+}
 
 const STEPS = [
   {
     id: 'host', title: '1 · 真的跑在飞书插件里吗',
     what: '这一步不是问「页面出没出来」—— 在普通浏览器里打开它当然出得来。要问的是「飞书愿不愿意加载它」。',
     async run() {
-      /* 第一版这里写的是「你现在能看到这个页面，这一步就过了」。
-         那句话在普通浏览器里也成立 —— 于是它给了一个假的通过，
-         而后面三步全部基于一个错误的前提。
+      /* 这一步改过两次，两次都错在同一个地方：**用一个不可靠的信号下硬结论。**
 
-         **一个在错误情况下也会通过的检查，等于没有检查。**
-         现在改成硬判据：不在插件容器里就直接判无效。 */
-      const hasSdk = Boolean(window.bitable || window.__LARK_BASE__);
-      const framed = window.self !== window.top;
-      const ua = navigator.userAgent;
-      const larkUA = /Lark|Feishu/i.test(ua);
-      const inContainer = hasSdk || (framed && larkUA);
+         第一版写的是「你现在能看到这个页面，这一步就过了」——
+         在普通浏览器里也成立，给了假通过。
 
+         第二版要求 `bitable SDK 已注入 或 (在 iframe 里 且 UA 含飞书)`。
+         但 SDK 是 npm 包、要页面自己 import，容器不注入；
+         UA 只有飞书**客户端**才带，网页版飞书里就是普通浏览器 UA。
+         于是它在真的插件容器里判了假失败。
+
+         现在的做法：证据摆出来，只有**顶层窗口**才敢判「不是」，
+         拿不到飞书痕迹时判「说不准」并继续跑，把结论留给人。 */
+      const e = containerEvidence();
       const detail = [
-        `源            ${location.origin}`,
-        `bitable SDK   ${hasSdk ? '已注入' : '未注入'}`,
-        `在 iframe 里  ${framed ? '是' : '否'}`,
-        `UA 含飞书标识  ${larkUA ? '是' : '否'}`,
+        `源              ${location.origin}`,
+        `在 iframe 里    ${e.framed ? '是' : '否'}`,
+        `父级源          ${e.ancestors.length ? e.ancestors.join(' ← ') : '（拿不到）'}`,
+        `referrer        ${e.ref || '（空）'}`,
+        `UA 含飞书标识    ${e.byUA ? '是（飞书客户端）' : '否（浏览器里的飞书网页版也是这样）'}`,
+        `bitable SDK     ${e.hasSdk ? '已注入' : '未注入（本页没引，正常）'}`,
       ].join('\n');
 
-      if (!inContainer) {
+      if (e.verdict === 'no') {
         return {
           ok: false, detail,
           verdict: { kind: 'bad', text:
-            '**这不是在飞书插件里跑的。** 页面直接在浏览器里打开时，后面三步全部不作数 —— '
-            + '同源、带 cookie、没有 CORS，那是系统本来就成立的情形，和插件能不能用无关。'
+            '**顶层窗口，不是插件。** 插件一定是嵌在飞书里的 iframe。'
+            + '页面直接在浏览器里打开时，后面三步全部不作数 —— 同源、带 cookie、没有 CORS，'
+            + '那是系统本来就成立的情形，和插件能不能用无关。'
             + '\n\n要验证的是：把这个页面**注册成飞书多维表格插件**，在飞书里打开它。' },
         };
       }
-      if (location.protocol === 'https:') {
+      const proto = location.protocol === 'https:'
+        ? '\n\n页面是 HTTPS，**接下来调 http:// 的局域网地址会被按混合内容拦掉** —— 第 2 步失败的话那不是网络问题。'
+        : '\n\n页面是 HTTP，和系统同协议，没有混合内容问题。';
+      if (e.verdict === 'unsure') {
         return { ok: true, detail,
           verdict: { kind: 'warn', text:
-            '在插件容器里，页面是 HTTPS。**接下来调 http:// 的局域网地址会被按混合内容拦掉** —— '
-            + '第 2 步失败的话那不是网络问题。' } };
+            '**在某个 iframe 里，但拿不到飞书的痕迹**（父级源和 referrer 都空，UA 也不含飞书标识）。'
+            + '飞书网页版 + 严格 referrer 策略下会是这个样子。'
+            + '如果你确实是在飞书的插件面板里看到这个页面的，那就是它，继续往下看；'
+            + '如果不是，后面三步不作数。' + proto } };
       }
       return { ok: true, detail,
-        verdict: { kind: 'ok', text: '在插件容器里，且页面是 HTTP —— 和系统同协议，没有混合内容问题。' } };
+        verdict: { kind: 'ok', text: '确认在飞书插件容器里（父级源/referrer/UA 至少有一条指向飞书）。' + proto } };
     },
   },
   {
