@@ -53,10 +53,10 @@
 <body>
 
 <h1>飞书插件可达性探针</h1>
-<div class="sub">四步，前一步不过就不用看后一步。每一步都会说清失败意味着什么。</div>
+<div class="sub">五步，前一步不过就不用看后一步。每一步都会说清失败意味着什么。</div>
 <div class="verdict warn" style="margin-bottom:14px">
   <b>必须在飞书插件里打开这个页面。</b>直接用浏览器打开测不出任何东西 ——
-  那时候页面和系统同源、cookie 正常带上，四步会全绿，但和插件能不能用毫无关系。
+  那时候页面和系统同源、cookie 正常带上，前四步会全绿，但和插件能不能用毫无关系。
 </div>
 
 <label>系统地址（Mac mini 的局域网地址）</label>
@@ -245,12 +245,51 @@ const STEPS = [
           ok: Boolean(j.you),
           detail: JSON.stringify(j, null, 2),
           verdict: j.you
-            ? { kind: 'ok', text: `认出来了：${j.you}。**四步全过，插件方案成立。**` }
+            ? { kind: 'ok', text: `认出来了：${j.you}。**可达性验证通过。**再看第 5 步：令牌存不存得住。` }
             : { kind: 'bad', text: '请求通了但没认出身份 —— 令牌错了、过期了，或者已经被吊销。' },
         };
       } catch (e) {
         return { ok: false, detail: String(e),
           verdict: { kind: 'bad', text: '带上 Authorization 头之后请求失败了。多半是预检（OPTIONS）没过 —— 检查白名单。' } };
+      }
+    },
+  },
+  {
+    id: 'store', title: '5 · 令牌存得住吗',
+    what: '插件是第三方 iframe。这里的 localStorage 不一定能用 —— 用户屏蔽第三方 cookie 时会连它一起拒绝。',
+    async run() {
+      /* 为什么这一步必须有：插件不能让商务每次手粘令牌，
+         所以登录一次拿到的令牌得存住。而第三方上下文里的存储**不归我们说了算** ——
+         和「同源了 cookie 还是不带」是同一个根因家族。
+         先验，比写完插件才发现每天都要重新登录便宜。
+
+         只能证伪不能证实：这一步过了只说明**这台机器这个设置下**能存。 */
+      const KEY = '__naimeng_probe_store__';
+      const val = 'v' + Date.now();
+      try {
+        localStorage.setItem(KEY, val);
+        const back = localStorage.getItem(KEY);
+        localStorage.removeItem(KEY);
+        if (back !== val) {
+          return { ok: false, detail: `写进去 ${val}，读回来 ${back}`,
+            verdict: { kind: 'bad', text: '**写得进读不回**。存储被隔离或被清空了，令牌存不住。' } };
+        }
+        /* 上一次运行留下的值还在，才说明它**跨会话**活着。
+           只测「写完立刻读回来」的话，一个纯内存的假存储也能过。 */
+        const PREV = '__naimeng_probe_persist__';
+        const prev = localStorage.getItem(PREV);
+        localStorage.setItem(PREV, val);
+        return { ok: true,
+          detail: `写读正常\n上次留下的值：${prev || '（无，这是第一次跑）'}`,
+          verdict: prev
+            ? { kind: 'ok', text: '**读到了上一次跑留下的值** —— 存储跨会话活着，令牌可以存在这儿。' }
+            : { kind: 'warn', text: '这次写读正常，但这是第一次跑，**还不能确认它跨会话活着**。把插件关掉重开，再跑一次这一步。' } };
+      } catch (e) {
+        return { ok: false, detail: String(e),
+          verdict: { kind: 'bad', text:
+            '**存储被拒绝**（多半是浏览器屏蔽了第三方 cookie，localStorage 一并被拒）。'
+            + '插件不能靠它存令牌 —— 退路是用 bitable SDK 自己的存储，'
+            + '最差是每次开插件重新输一次口令。' } };
       }
     },
   },
